@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Global resets ─────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: 'Inter', system-ui, sans-serif;
+  background: #1e1e2e;
+  color: #e2e2f0;
+}
+
+/* Fabric.js canvas cursor overrides */
+.canvas-container canvas {
+  display: block !important;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #2a2a3e; }
+::-webkit-scrollbar-thumb { background: #7c6af7; border-radius: 3px; }
