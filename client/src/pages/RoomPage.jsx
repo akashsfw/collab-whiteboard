@@ -203,8 +203,16 @@ export default function RoomPage() {
           />
         )}
 
-        {/* Canvas + Overlay wrapper */}
-        <div className="relative flex-1 overflow-hidden">
+        {/* Canvas + Overlay wrapper with dynamic infinite dot grid */}
+        <div
+          className="relative flex-1 overflow-hidden"
+          style={{
+            backgroundColor: '#1e1e2e',
+            backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.16) 1.2px, transparent 1.2px)',
+            backgroundSize: `${Math.max(12, 28 * (viewport.zoom || 1))}px ${Math.max(12, 28 * (viewport.zoom || 1))}px`,
+            backgroundPosition: `${viewport.x || 0}px ${viewport.y || 0}px`,
+          }}
+        >
           <WhiteboardCanvas
             ref={canvasRef}
             roomId={roomId}
@@ -230,6 +238,31 @@ export default function RoomPage() {
 
           {/* Live cursors */}
           <CursorLayer />
+
+          {/* Infinite Viewport Controls (Zoom In, Zoom Out, Recenter) */}
+          <div className="absolute bottom-16 md:bottom-4 right-3 md:right-4 z-20 flex items-center bg-surface/90 backdrop-blur-md border border-white/10 rounded-xl shadow-xl text-xs text-muted select-none">
+            <button
+              onClick={() => canvasRef.current?.zoomOut()}
+              title="Zoom Out (−)"
+              className="hover:text-white px-2.5 py-1.5 transition-colors font-bold text-sm"
+            >
+              −
+            </button>
+            <button
+              onClick={() => canvasRef.current?.resetView()}
+              title="Click to Recenter view to 100%"
+              className="hover:text-white px-2 py-1.5 border-x border-white/10 font-mono text-[11px] transition-colors"
+            >
+              {Math.round((viewport.zoom || 1) * 100)}% ⊙
+            </button>
+            <button
+              onClick={() => canvasRef.current?.zoomIn()}
+              title="Zoom In (+)"
+              className="hover:text-white px-2.5 py-1.5 transition-colors font-bold text-sm"
+            >
+              +
+            </button>
+          </div>
         </div>
       </div>
 

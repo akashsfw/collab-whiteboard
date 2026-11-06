@@ -1,7 +1,8 @@
 import { useRef, useState } from 'react';
 
 const TOOLS = [
-  { id: 'select', icon: '↖', label: 'Select' },
+  { id: 'select', icon: '↖', label: 'Select & Move' },
+  { id: 'hand',   icon: '✋', label: 'Hand (Pan Canvas)' },
   { id: 'pen',    icon: '✏️', label: 'Pen' },
   { id: 'eraser', icon: '🧹', label: 'Eraser' },
   { id: 'rect',   icon: '▭', label: 'Rectangle' },

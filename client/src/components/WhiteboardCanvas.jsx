@@ -11,14 +11,16 @@ import { getSocket } from '../lib/socket.js';
 /**
  * WhiteboardCanvas
  *
- * Real-time collaborative canvas powered by Fabric.js v6.
+ * Real-time collaborative infinite canvas powered by Fabric.js v6.
  * Features:
+ *   - Infinite coordinate space & smooth panning (Hand tool, Space+Drag, Alt+Drag, Middle Click)
+ *   - Dynamic infinite grid alignment
+ *   - Immovable, unclickable permanent checkpoints (Flatten Canvas)
  *   - Drawing tools (pen, eraser, shapes, text)
  *   - Image uploading & clipboard paste
  *   - Hyperlinks on objects
  *   - Undo / Redo history
  *   - Delete selected objects
- *   - Save Checkpoint (Flatten canvas into an un-undoable base image)
  *   - Touch support: 1-finger draw, 2-finger pinch-to-zoom & pan
  *   - Real-time Socket.io synchronization
  */
@@ -37,8 +39,9 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   const containerRef = useRef(null);
   const fabricRef = useRef(null);   // Single persistent fabric.Canvas instance
   const isSyncing = useRef(false);  // Prevent broadcast echo loops
+  const spacePressed = useRef(false);
 
-  // Mutable refs so callbacks always access the latest values without re-mounting
+  // Mutable refs so callbacks always access latest values without re-mounting
   const isEditorRef = useRef(isEditor);
   isEditorRef.current = isEditor;
 
@@ -82,6 +85,24 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     socket.emit('canvas:sync', { roomId, canvasJSON: json });
   }, [roomId]);
 
+  // Ensure checkpoint base images always stay at the bottom and are unselectable
+  const enforceCheckpointLock = useCallback((canvas) => {
+    if (!canvas) return;
+    canvas.getObjects().forEach((o) => {
+      if (o.isCheckpoint) {
+        o.selectable = false;
+        o.evented = false;
+        o.hoverCursor = 'default';
+        o.moveCursor = 'default';
+        o.lockMovementX = true;
+        o.lockMovementY = true;
+        o.hasControls = false;
+        o.hasBorders = false;
+        canvas.sendObjectToBack(o);
+      }
+    });
+  }, []);
+
   // ── Helper: Insert an image from Data URL onto canvas ────────────────────
   const addImageFromDataURL = useCallback(async (dataUrl) => {
     const canvas = fabricRef.current;
@@ -111,6 +132,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
       canvas.add(img);
       canvas.setActiveObject(img);
+      enforceCheckpointLock(canvas);
       canvas.renderAll();
 
       pushSnapshotToUndo();
@@ -118,7 +140,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     } catch (err) {
       console.error('Failed to load image onto canvas:', err);
     }
-  }, [emitObjectAdded, recordSnapshot, pushSnapshotToUndo]);
+  }, [emitObjectAdded, recordSnapshot, pushSnapshotToUndo, enforceCheckpointLock]);
 
   // ── Undo Action ──────────────────────────────────────────────────────────
   const undo = useCallback(async () => {
@@ -133,12 +155,13 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const prevJson = JSON.parse(prevJsonStr);
 
     await canvas.loadFromJSON(prevJson);
+    enforceCheckpointLock(canvas);
     canvas.renderAll();
     isHistoryAction.current = false;
 
     const socket = getSocket();
     socket.emit('canvas:sync', { roomId, canvasJSON: prevJson });
-  }, [roomId]);
+  }, [roomId, enforceCheckpointLock]);
 
   // ── Redo Action ──────────────────────────────────────────────────────────
   const redo = useCallback(async () => {
@@ -153,12 +176,13 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const nextJson = JSON.parse(nextJsonStr);
 
     await canvas.loadFromJSON(nextJson);
+    enforceCheckpointLock(canvas);
     canvas.renderAll();
     isHistoryAction.current = false;
 
     const socket = getSocket();
     socket.emit('canvas:sync', { roomId, canvasJSON: nextJson });
-  }, [roomId]);
+  }, [roomId, enforceCheckpointLock]);
 
   // ── Delete Selected Objects ──────────────────────────────────────────────
   const deleteSelected = useCallback(() => {
@@ -175,6 +199,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     recordSnapshot();
     canvas.discardActiveObject();
     canvas.remove(...validObjects);
+    enforceCheckpointLock(canvas);
     canvas.renderAll();
 
     pushSnapshotToUndo();
@@ -184,61 +209,84 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       roomId,
       canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
     });
-  }, [roomId, recordSnapshot, pushSnapshotToUndo]);
+  }, [roomId, recordSnapshot, pushSnapshotToUndo, enforceCheckpointLock]);
 
-  // ── Save Checkpoint (Flatten canvas into an un-undoable base image) ───────
+  // ── Save Checkpoint (Flatten canvas into an immovable, locked base) ──────
   const saveCheckpoint = useCallback(async () => {
     const canvas = fabricRef.current;
     if (!canvas || !isEditorRef.current) return;
 
-    const objects = canvas.getObjects();
-    if (objects.length === 0) {
-      alert('Canvas is currently empty. Draw or add elements before saving a checkpoint.');
+    const nonCheckpointObjs = canvas.getObjects().filter((o) => !o.isCheckpoint);
+    if (nonCheckpointObjs.length === 0) {
+      alert('No new edits to save. Draw or add something over the canvas first.');
       return;
     }
 
     const confirmed = window.confirm(
       'Save this canvas as a permanent checkpoint?\n\n' +
-      '• All current drawings and texts will be flattened into a single background image.\n' +
-      '• Previous actions will become locked and cannot be undone.\n' +
-      '• New elements, images, and eraser marks can still be added on top.'
+      '• All current drawings and texts will be flattened into a single locked, immovable background image.\n' +
+      '• Once saved, new edits will write OVER the flattened image.\n' +
+      '• Previous actions will become locked and cannot be undone.'
     );
     if (!confirmed) return;
 
     try {
       isSyncing.current = true;
-
-      // Deselect active items to avoid rendering selection boxes
       canvas.discardActiveObject();
 
-      // Temporarily reset zoom/pan to 1:1 to capture the full canvas content accurately
+      // Find the absolute bounding rectangle covering all objects on the infinite plane
+      const allObjects = canvas.getObjects();
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+
+      allObjects.forEach((o) => {
+        const br = o.getBoundingRect(true);
+        if (br.left < minX) minX = br.left;
+        if (br.top < minY) minY = br.top;
+        if (br.left + br.width > maxX) maxX = br.left + br.width;
+        if (br.top + br.height > maxY) maxY = br.top + br.height;
+      });
+
+      // Add a 40px margin around content
+      const pad = 40;
+      minX = Math.floor(minX - pad);
+      minY = Math.floor(minY - pad);
+      const width = Math.ceil(maxX - minX + pad * 2);
+      const height = Math.ceil(maxY - minY + pad * 2);
+
+      // Save viewport transform to restore afterward
       const savedVpt = canvas.viewportTransform.slice();
       canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
       canvas.renderAll();
 
       const dataUrl = canvas.toDataURL({
         format: 'png',
+        left: minX,
+        top: minY,
+        width: width,
+        height: height,
         multiplier: 1,
       });
 
-      // Restore user's current viewport pan & zoom
       canvas.setViewportTransform(savedVpt);
 
-      // Clear existing vector objects
+      // Clear existing individual objects
       canvas.clear();
-      canvas.backgroundColor = '#1e1e2e';
 
-      // Load flattened image as non-interactive base
+      // Create a single completely immovable, non-evented checkpoint image
       const flatImg = await fabric.FabricImage.fromURL(dataUrl);
       flatImg.set({
-        left: 0,
-        top: 0,
-        selectable: false,
-        evented: false,
+        left: minX,
+        top: minY,
+        selectable: false, // Cannot be selected or dragged
+        evented: false,    // Transparent to clicks: never intercepts pointer events!
+        hoverCursor: 'default',
+        moveCursor: 'default',
         lockMovementX: true,
         lockMovementY: true,
         lockScalingX: true,
         lockScalingY: true,
+        hasControls: false,
+        hasBorders: false,
         isCheckpoint: true,
       });
 
@@ -257,14 +305,45 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       const socket = getSocket();
       socket.emit('canvas:sync', { roomId, canvasJSON: json });
 
-      alert('✓ Checkpoint saved! The canvas is now locked into a flattened base.');
+      alert('✓ Checkpoint saved! Canvas is now flattened and locked.');
     } catch (err) {
       console.error('Failed to save checkpoint:', err);
       isSyncing.current = false;
     }
   }, [roomId]);
 
-  // ── Expose imperative canvas actions to Toolbar ──────────────────────────
+  // ── Viewport Control Helpers (Zoom & Recenter) ───────────────────────────
+  const zoomIn = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const center = { x: canvas.width / 2, y: canvas.height / 2 };
+    let zoom = canvas.getZoom() * 1.25;
+    zoom = Math.min(15, zoom);
+    canvas.zoomToPoint(center, zoom);
+    const vpt = canvas.viewportTransform;
+    onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
+  }, [onViewportChange]);
+
+  const zoomOut = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    const center = { x: canvas.width / 2, y: canvas.height / 2 };
+    let zoom = canvas.getZoom() * 0.8;
+    zoom = Math.max(0.05, zoom);
+    canvas.zoomToPoint(center, zoom);
+    const vpt = canvas.viewportTransform;
+    onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
+  }, [onViewportChange]);
+
+  const resetView = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+    canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+    canvas.renderAll();
+    onViewportChange?.({ x: 0, y: 0, zoom: 1 });
+  }, [onViewportChange]);
+
+  // ── Expose imperative canvas actions to parent / Toolbar ─────────────────
   useImperativeHandle(ref, () => ({
     getCanvas: () => fabricRef.current,
     addImageFromDataURL,
@@ -272,6 +351,9 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     redo,
     deleteSelected,
     saveCheckpoint,
+    zoomIn,
+    zoomOut,
+    resetView,
 
     addShape(type) {
       const canvas = fabricRef.current;
@@ -279,7 +361,12 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       recordSnapshot();
 
       const color = activeColorRef.current;
-      const opts = { left: 120, top: 120, fill: 'transparent', stroke: color, strokeWidth: 2 };
+      const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0];
+      const zoom = canvas.getZoom() || 1;
+      const spawnX = (-vpt[4] + canvas.width / 2) / zoom - 75;
+      const spawnY = (-vpt[5] + canvas.height / 2) / zoom - 50;
+
+      const opts = { left: spawnX, top: spawnY, fill: 'transparent', stroke: color, strokeWidth: 2 };
       const shape =
         type === 'rect'
           ? new fabric.Rect({ ...opts, width: 150, height: 100 })
@@ -287,6 +374,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
       canvas.add(shape);
       canvas.setActiveObject(shape);
+      enforceCheckpointLock(canvas);
       canvas.renderAll();
 
       pushSnapshotToUndo();
@@ -298,15 +386,21 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       if (!canvas || !isEditorRef.current) return;
       recordSnapshot();
 
+      const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0];
+      const zoom = canvas.getZoom() || 1;
+      const spawnX = (-vpt[4] + canvas.width / 2) / zoom - 80;
+      const spawnY = (-vpt[5] + canvas.height / 2) / zoom - 20;
+
       const text = new fabric.IText('Double-click to edit', {
-        left: 150,
-        top: 150,
+        left: spawnX,
+        top: spawnY,
         fill: activeColorRef.current,
-        fontSize: 20,
+        fontSize: 22,
         fontFamily: 'Inter, sans-serif',
       });
       canvas.add(text);
       canvas.setActiveObject(text);
+      enforceCheckpointLock(canvas);
       canvas.renderAll();
 
       pushSnapshotToUndo();
@@ -353,7 +447,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
       });
     },
-  }), [addImageFromDataURL, undo, redo, deleteSelected, saveCheckpoint, emitObjectAdded, recordSnapshot, pushSnapshotToUndo, roomId]);
+  }), [addImageFromDataURL, undo, redo, deleteSelected, saveCheckpoint, zoomIn, zoomOut, resetView, emitObjectAdded, recordSnapshot, pushSnapshotToUndo, roomId, enforceCheckpointLock]);
 
   // ── 1. Persistent Canvas Lifecycle (Mounts ONCE) ──────────────────────────
   useEffect(() => {
@@ -363,9 +457,10 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const canvas = new fabric.Canvas('whiteboard-canvas', {
       width: el.clientWidth,
       height: el.clientHeight,
-      backgroundColor: '#1e1e2e',
+      backgroundColor: 'transparent', // Transparent so infinite dot grid shines through
       selection: isEditorRef.current,
       isDrawingMode: false,
+      preserveObjectStacking: true, // Crucial: preserves object layering when clicked!
     });
     fabricRef.current = canvas;
 
@@ -376,18 +471,32 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     });
     observer.observe(el);
 
-    // Track mouse down
+    // Mouse Down (Support Pan with Hand tool, Space, Alt, or Middle Mouse)
     canvas.on('mouse:down', (opt) => {
-      if (opt.e.altKey) {
+      const isPanTrigger =
+        activeToolRef.current === 'hand' ||
+        opt.e.altKey ||
+        opt.e.button === 1 || // Middle mouse click
+        spacePressed.current;
+
+      if (isPanTrigger) {
         canvas._isDragging = true;
         canvas._lastPosX = opt.e.clientX;
         canvas._lastPosY = opt.e.clientY;
+        canvas.defaultCursor = 'grabbing';
+        canvas.renderAll();
         return;
       }
+
+      // Deselect if someone clicks on a checkpoint
+      if (opt.target && opt.target.isCheckpoint) {
+        canvas.discardActiveObject();
+      }
+
       recordSnapshot();
     });
 
-    // Pan on Alt+drag
+    // Mouse Move (Infinite Pan)
     canvas.on('mouse:move', (opt) => {
       if (!canvas._isDragging) return;
       const vpt = canvas.viewportTransform.slice();
@@ -398,14 +507,19 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas._lastPosY = opt.e.clientY;
       onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: canvas.getZoom() });
     });
-    canvas.on('mouse:up', () => { canvas._isDragging = false; });
 
-    // Scroll-to-zoom
+    canvas.on('mouse:up', () => {
+      canvas._isDragging = false;
+      canvas.defaultCursor = activeToolRef.current === 'hand' || spacePressed.current ? 'grab' : 'default';
+      canvas.renderAll();
+    });
+
+    // Scroll-to-zoom (Infinite zoom range: 0.05 to 15)
     canvas.on('mouse:wheel', (opt) => {
       const delta = opt.e.deltaY;
       let zoom = canvas.getZoom();
       zoom *= 0.999 ** delta;
-      zoom = Math.max(0.2, Math.min(10, zoom));
+      zoom = Math.max(0.05, Math.min(15, zoom));
       canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
       opt.e.preventDefault();
       opt.e.stopPropagation();
@@ -444,7 +558,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         const t2 = e.touches[1];
         const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
         const factor = dist / touchStartDist;
-        const newZoom = Math.max(0.2, Math.min(10, touchStartZoom * factor));
+        const newZoom = Math.max(0.05, Math.min(15, touchStartZoom * factor));
         canvas.zoomToPoint(touchStartCenter, newZoom);
 
         const currentCenter = {
@@ -506,13 +620,20 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       }
     };
 
-    // Keyboard Shortcuts
+    // Keyboard Shortcuts & Space-to-Pan
     const handleKeyDown = (e) => {
-      if (!isEditorRef.current) return;
       if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
 
       const activeObj = canvas.getActiveObject();
       if (activeObj && activeObj.isEditing) return;
+
+      if (e.code === 'Space' && !spacePressed.current) {
+        spacePressed.current = true;
+        canvas.defaultCursor = 'grab';
+        canvas.renderAll();
+      }
+
+      if (!isEditorRef.current) return;
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -530,10 +651,19 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       }
     };
 
+    const handleKeyUp = (e) => {
+      if (e.code === 'Space') {
+        spacePressed.current = false;
+        canvas.defaultCursor = activeToolRef.current === 'hand' ? 'grab' : 'default';
+        canvas.renderAll();
+      }
+    };
+
     el.addEventListener('dragover', handleDragOver);
     el.addEventListener('drop', handleDrop);
     window.addEventListener('paste', handlePaste);
     window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
 
     return () => {
       observer.disconnect();
@@ -547,21 +677,24 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       el.removeEventListener('drop', handleDrop);
       window.removeEventListener('paste', handlePaste);
       window.removeEventListener('keydown', handleKeyDown);
-      canvas.dispose(); // Only disposes on unmount!
+      window.removeEventListener('keyup', handleKeyUp);
+      canvas.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Run ONCE on mount!
+  }, []); // Run ONCE on mount
 
-  // ── 2. Handle Role Transition (Observer -> Editor) Without Canvas Reset ────
+  // ── 2. Handle Role Transition (Observer -> Editor) ─────────────────────────
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
-    canvas.selection = isEditor;
+    canvas.selection = isEditor && activeTool !== 'hand';
     canvas.getObjects().forEach((o) => {
       if (o.isCheckpoint) {
         o.selectable = false;
         o.evented = false;
+        o.hoverCursor = 'default';
+        o.moveCursor = 'default';
       } else {
         o.selectable = isEditor;
         o.evented = isEditor || !!o.hyperlink;
@@ -571,7 +704,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       }
     });
     canvas.renderAll();
-  }, [isEditor]);
+  }, [isEditor, activeTool]);
 
   // ── 3. Load initial canvas state from server ──────────────────────────────
   useEffect(() => {
@@ -585,30 +718,32 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     ).then(() => {
       const canvas = fabricRef.current;
       if (canvas) {
-        canvas.selection = isEditorRef.current;
-        canvas.getObjects().forEach((o) => {
-          if (o.isCheckpoint) {
-            o.selectable = false;
-            o.evented = false;
-          } else {
-            o.selectable = isEditorRef.current;
-            o.evented = isEditorRef.current || !!o.hyperlink;
-            if (!isEditorRef.current && o.hyperlink) o.hoverCursor = 'pointer';
-          }
-        });
+        canvas.selection = isEditorRef.current && activeToolRef.current !== 'hand';
+        enforceCheckpointLock(canvas);
         canvas.renderAll();
       }
       isSyncing.current = false;
     });
-  }, [initialCanvas]);
+  }, [initialCanvas, enforceCheckpointLock]);
 
-  // ── 4. Tool mode switching (Pen, Eraser, Select) ──────────────────────────
+  // ── 4. Tool mode switching (Select, Hand, Pen, Eraser) ────────────────────
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
     canvas.isDrawingMode = false;
-    canvas.selection = isEditor;
+    canvas.selection = isEditor && activeTool !== 'hand';
+
+    if (activeTool === 'hand') {
+      canvas.defaultCursor = 'grab';
+      canvas.hoverCursor = 'grab';
+      canvas.discardActiveObject();
+      canvas.renderAll();
+      return;
+    } else {
+      canvas.defaultCursor = 'default';
+      canvas.hoverCursor = 'move';
+    }
 
     if (!isEditor) {
       canvas.renderAll();
@@ -643,11 +778,13 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     function onObjectAdded({ target }) {
       if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
+      enforceCheckpointLock(canvas);
       pushSnapshotToUndo();
       emitObjectAdded(target);
     }
     function onObjectModified({ target }) {
       if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
+      enforceCheckpointLock(canvas);
       pushSnapshotToUndo();
       const socket = getSocket();
       socket.emit('canvas:object:modified', {
@@ -672,7 +809,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     function onMouseDown(opt) {
       const target = opt.target;
-      if (target && target.hyperlink) {
+      if (target && target.hyperlink && !target.isCheckpoint) {
         if (!isEditorRef.current || opt.e.ctrlKey || opt.e.metaKey) {
           window.open(target.hyperlink, '_blank', 'noopener,noreferrer');
         }
@@ -689,17 +826,8 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const handleSync = ({ canvasJSON }) => {
       isSyncing.current = true;
       canvas.loadFromJSON(canvasJSON).then(() => {
-        canvas.selection = isEditorRef.current;
-        canvas.getObjects().forEach((o) => {
-          if (o.isCheckpoint) {
-            o.selectable = false;
-            o.evented = false;
-          } else {
-            o.selectable = isEditorRef.current;
-            o.evented = isEditorRef.current || !!o.hyperlink;
-            if (!isEditorRef.current && o.hyperlink) o.hoverCursor = 'pointer';
-          }
-        });
+        canvas.selection = isEditorRef.current && activeToolRef.current !== 'hand';
+        enforceCheckpointLock(canvas);
         canvas.renderAll();
         isSyncing.current = false;
       });
@@ -713,7 +841,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas.off('mouse:down', onMouseDown);
       socket.off('canvas:sync', handleSync);
     };
-  }, [roomId, emitObjectAdded, pushSnapshotToUndo]);
+  }, [roomId, emitObjectAdded, pushSnapshotToUndo, enforceCheckpointLock]);
 
   // ── 6. Cursor Presence Broadcast ──────────────────────────────────────────
   useEffect(() => {
