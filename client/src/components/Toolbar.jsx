@@ -47,10 +47,8 @@ export default function Toolbar({
     e.target.value = '';
   }
 
-  function handleClear() {
-    if (window.confirm('Clear the entire canvas? This cannot be undone.')) {
-      canvasRef.current?.clearCanvas();
-    }
+  function handleSaveCheckpoint() {
+    canvasRef.current?.saveCheckpoint();
   }
 
   return (
@@ -148,8 +146,12 @@ export default function Toolbar({
 
         <Divider />
 
-        {/* Clear */}
-        <ToolBtn icon="🗑" label="Clear Canvas" onClick={handleClear} danger />
+        {/* Save Checkpoint (Flatten) */}
+        <ToolBtn
+          icon="💾"
+          label="Save Checkpoint (Flatten)"
+          onClick={handleSaveCheckpoint}
+        />
       </aside>
 
       {/* ── MOBILE FLOATING BOTTOM BAR (< md) ──────────────────────────────── */}
@@ -266,10 +268,9 @@ export default function Toolbar({
                 danger
               />
               <ToolBtn
-                icon="🗑"
-                label="Clear"
-                onClick={handleClear}
-                danger
+                icon="💾"
+                label="Save Checkpoint"
+                onClick={handleSaveCheckpoint}
               />
             </div>
           )}

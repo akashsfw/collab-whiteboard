@@ -11,14 +11,16 @@ import { getSocket } from '../lib/socket.js';
 /**
  * WhiteboardCanvas
  *
- * Wraps a Fabric.js canvas and wires up:
+ * Real-time collaborative canvas powered by Fabric.js v6.
+ * Features:
  *   - Drawing tools (pen, eraser, shapes, text)
- *   - Image upload (via file selector, drag-and-drop, or clipboard paste)
+ *   - Image uploading & clipboard paste
  *   - Hyperlinks on objects
- *   - Undo / Redo history management
+ *   - Undo / Redo history
  *   - Delete selected objects
- *   - Socket.io real-time sync (bi-directional)
- *   - Viewport (pan/zoom) reporting for media overlay sync
+ *   - Save Checkpoint (Flatten canvas into an un-undoable base image)
+ *   - Touch support: 1-finger draw, 2-finger pinch-to-zoom & pan
+ *   - Real-time Socket.io synchronization
  */
 const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   {
@@ -33,26 +35,38 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   ref
 ) {
   const containerRef = useRef(null);
-  const fabricRef = useRef(null);   // fabric.Canvas instance
-  const isSyncing = useRef(false);  // prevent echo loops
+  const fabricRef = useRef(null);   // Single persistent fabric.Canvas instance
+  const isSyncing = useRef(false);  // Prevent broadcast echo loops
 
-  // ── Undo / Redo History Stacks ───────────────────────────────────────────
+  // Mutable refs so callbacks always access the latest values without re-mounting
+  const isEditorRef = useRef(isEditor);
+  isEditorRef.current = isEditor;
+
+  const activeToolRef = useRef(activeTool);
+  activeToolRef.current = activeTool;
+
+  const activeColorRef = useRef(activeColor);
+  activeColorRef.current = activeColor;
+
+  const brushSizeRef = useRef(brushSize);
+  brushSizeRef.current = brushSize;
+
+  // ── Undo / Redo Stacks ───────────────────────────────────────────────────
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const isHistoryAction = useRef(false);
   const pendingSnapshot = useRef(null);
 
-  // Helper to record a state snapshot before modifications
   const recordSnapshot = useCallback(() => {
     if (!fabricRef.current || isSyncing.current || isHistoryAction.current) return;
-    pendingSnapshot.current = JSON.stringify(fabricRef.current.toJSON(['hyperlink']));
+    pendingSnapshot.current = JSON.stringify(fabricRef.current.toJSON(['hyperlink', 'isCheckpoint']));
   }, []);
 
   const pushSnapshotToUndo = useCallback(() => {
     if (!pendingSnapshot.current || isSyncing.current || isHistoryAction.current) return;
     undoStack.current.push(pendingSnapshot.current);
     if (undoStack.current.length > 50) undoStack.current.shift();
-    redoStack.current = []; // reset redo on new action
+    redoStack.current = [];
     pendingSnapshot.current = null;
   }, []);
 
@@ -60,26 +74,26 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   const emitObjectAdded = useCallback((obj) => {
     if (isSyncing.current || !fabricRef.current) return;
     const socket = getSocket();
-    socket.emit('canvas:object:added', { roomId, object: obj.toObject(['id', 'hyperlink']) });
-    const json = fabricRef.current.toJSON(['hyperlink']);
+    socket.emit('canvas:object:added', {
+      roomId,
+      object: obj.toObject(['id', 'hyperlink', 'isCheckpoint']),
+    });
+    const json = fabricRef.current.toJSON(['hyperlink', 'isCheckpoint']);
     socket.emit('canvas:sync', { roomId, canvasJSON: json });
   }, [roomId]);
 
-  // ── Helper: Insert an image from Data URL onto canvas (Fabric v6 async) ──
+  // ── Helper: Insert an image from Data URL onto canvas ────────────────────
   const addImageFromDataURL = useCallback(async (dataUrl) => {
     const canvas = fabricRef.current;
-    if (!canvas) return;
+    if (!canvas || !isEditorRef.current) return;
 
     try {
       recordSnapshot();
 
       const img = await fabric.FabricImage.fromURL(dataUrl);
-
-      // Fit nicely within view
       const maxDim = Math.min(380, canvas.width * 0.75);
       img.scaleToWidth(maxDim);
 
-      // Center in current viewport
       const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0];
       const zoom = canvas.getZoom() || 1;
       const centerX = (-vpt[4] + canvas.width / 2) / zoom;
@@ -91,8 +105,8 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         cornerColor: '#7c6af7',
         cornerSize: 10,
         transparentCorners: false,
-        selectable: isEditor,
-        evented: isEditor,
+        selectable: true,
+        evented: true,
       });
 
       canvas.add(img);
@@ -104,15 +118,15 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     } catch (err) {
       console.error('Failed to load image onto canvas:', err);
     }
-  }, [isEditor, emitObjectAdded, recordSnapshot, pushSnapshotToUndo]);
+  }, [emitObjectAdded, recordSnapshot, pushSnapshotToUndo]);
 
   // ── Undo Action ──────────────────────────────────────────────────────────
   const undo = useCallback(async () => {
     const canvas = fabricRef.current;
-    if (!canvas || undoStack.current.length === 0 || !isEditor) return;
+    if (!canvas || undoStack.current.length === 0 || !isEditorRef.current) return;
 
     isHistoryAction.current = true;
-    const currentJson = JSON.stringify(canvas.toJSON(['hyperlink']));
+    const currentJson = JSON.stringify(canvas.toJSON(['hyperlink', 'isCheckpoint']));
     redoStack.current.push(currentJson);
 
     const prevJsonStr = undoStack.current.pop();
@@ -124,15 +138,15 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     const socket = getSocket();
     socket.emit('canvas:sync', { roomId, canvasJSON: prevJson });
-  }, [roomId, isEditor]);
+  }, [roomId]);
 
   // ── Redo Action ──────────────────────────────────────────────────────────
   const redo = useCallback(async () => {
     const canvas = fabricRef.current;
-    if (!canvas || redoStack.current.length === 0 || !isEditor) return;
+    if (!canvas || redoStack.current.length === 0 || !isEditorRef.current) return;
 
     isHistoryAction.current = true;
-    const currentJson = JSON.stringify(canvas.toJSON(['hyperlink']));
+    const currentJson = JSON.stringify(canvas.toJSON(['hyperlink', 'isCheckpoint']));
     undoStack.current.push(currentJson);
 
     const nextJsonStr = redoStack.current.pop();
@@ -144,45 +158,133 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     const socket = getSocket();
     socket.emit('canvas:sync', { roomId, canvasJSON: nextJson });
-  }, [roomId, isEditor]);
+  }, [roomId]);
 
   // ── Delete Selected Objects ──────────────────────────────────────────────
   const deleteSelected = useCallback(() => {
     const canvas = fabricRef.current;
-    if (!canvas || !isEditor) return;
+    if (!canvas || !isEditorRef.current) return;
 
     const activeObjects = canvas.getActiveObjects();
     if (!activeObjects || activeObjects.length === 0) return;
 
+    // Do not allow deleting permanent checkpoint base
+    const validObjects = activeObjects.filter((o) => !o.isCheckpoint);
+    if (validObjects.length === 0) return;
+
     recordSnapshot();
     canvas.discardActiveObject();
-    canvas.remove(...activeObjects);
+    canvas.remove(...validObjects);
     canvas.renderAll();
 
     pushSnapshotToUndo();
 
     const socket = getSocket();
-    socket.emit('canvas:sync', { roomId, canvasJSON: canvas.toJSON(['hyperlink']) });
-  }, [isEditor, roomId, recordSnapshot, pushSnapshotToUndo]);
+    socket.emit('canvas:sync', {
+      roomId,
+      canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
+    });
+  }, [roomId, recordSnapshot, pushSnapshotToUndo]);
 
-  // ── Expose imperative canvas actions to parent/Toolbar ───────────────────
+  // ── Save Checkpoint (Flatten canvas into an un-undoable base image) ───────
+  const saveCheckpoint = useCallback(async () => {
+    const canvas = fabricRef.current;
+    if (!canvas || !isEditorRef.current) return;
+
+    const objects = canvas.getObjects();
+    if (objects.length === 0) {
+      alert('Canvas is currently empty. Draw or add elements before saving a checkpoint.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      'Save this canvas as a permanent checkpoint?\n\n' +
+      '• All current drawings and texts will be flattened into a single background image.\n' +
+      '• Previous actions will become locked and cannot be undone.\n' +
+      '• New elements, images, and eraser marks can still be added on top.'
+    );
+    if (!confirmed) return;
+
+    try {
+      isSyncing.current = true;
+
+      // Deselect active items to avoid rendering selection boxes
+      canvas.discardActiveObject();
+
+      // Temporarily reset zoom/pan to 1:1 to capture the full canvas content accurately
+      const savedVpt = canvas.viewportTransform.slice();
+      canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
+      canvas.renderAll();
+
+      const dataUrl = canvas.toDataURL({
+        format: 'png',
+        multiplier: 1,
+      });
+
+      // Restore user's current viewport pan & zoom
+      canvas.setViewportTransform(savedVpt);
+
+      // Clear existing vector objects
+      canvas.clear();
+      canvas.backgroundColor = '#1e1e2e';
+
+      // Load flattened image as non-interactive base
+      const flatImg = await fabric.FabricImage.fromURL(dataUrl);
+      flatImg.set({
+        left: 0,
+        top: 0,
+        selectable: false,
+        evented: false,
+        lockMovementX: true,
+        lockMovementY: true,
+        lockScalingX: true,
+        lockScalingY: true,
+        isCheckpoint: true,
+      });
+
+      canvas.add(flatImg);
+      canvas.sendObjectToBack(flatImg);
+      canvas.renderAll();
+
+      // Clear undo & redo stacks so previous actions cannot be undone
+      undoStack.current = [];
+      redoStack.current = [];
+
+      isSyncing.current = false;
+
+      // Broadcast the checkpoint to the server and all connected peers
+      const json = canvas.toJSON(['hyperlink', 'isCheckpoint']);
+      const socket = getSocket();
+      socket.emit('canvas:sync', { roomId, canvasJSON: json });
+
+      alert('✓ Checkpoint saved! The canvas is now locked into a flattened base.');
+    } catch (err) {
+      console.error('Failed to save checkpoint:', err);
+      isSyncing.current = false;
+    }
+  }, [roomId]);
+
+  // ── Expose imperative canvas actions to Toolbar ──────────────────────────
   useImperativeHandle(ref, () => ({
     getCanvas: () => fabricRef.current,
-
     addImageFromDataURL,
     undo,
     redo,
     deleteSelected,
+    saveCheckpoint,
 
     addShape(type) {
       const canvas = fabricRef.current;
-      if (!canvas) return;
+      if (!canvas || !isEditorRef.current) return;
       recordSnapshot();
 
-      let shape;
-      const opts = { left: 120, top: 120, fill: 'transparent', stroke: activeColor, strokeWidth: 2 };
-      if (type === 'rect') shape = new fabric.Rect({ ...opts, width: 150, height: 100 });
-      else if (type === 'circle') shape = new fabric.Ellipse({ ...opts, rx: 75, ry: 50 });
+      const color = activeColorRef.current;
+      const opts = { left: 120, top: 120, fill: 'transparent', stroke: color, strokeWidth: 2 };
+      const shape =
+        type === 'rect'
+          ? new fabric.Rect({ ...opts, width: 150, height: 100 })
+          : new fabric.Ellipse({ ...opts, rx: 75, ry: 50 });
+
       canvas.add(shape);
       canvas.setActiveObject(shape);
       canvas.renderAll();
@@ -193,12 +295,13 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     addText() {
       const canvas = fabricRef.current;
-      if (!canvas) return;
+      if (!canvas || !isEditorRef.current) return;
       recordSnapshot();
 
       const text = new fabric.IText('Double-click to edit', {
-        left: 150, top: 150,
-        fill: activeColor,
+        left: 150,
+        top: 150,
+        fill: activeColorRef.current,
         fontSize: 20,
         fontFamily: 'Inter, sans-serif',
       });
@@ -212,10 +315,10 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     addHyperlinkToSelected() {
       const canvas = fabricRef.current;
-      if (!canvas) return;
+      if (!canvas || !isEditorRef.current) return;
       const activeObj = canvas.getActiveObject();
-      if (!activeObj) {
-        alert('Please select an object or text on the canvas first.');
+      if (!activeObj || activeObj.isCheckpoint) {
+        alert('Please select an editable object or text on the canvas first.');
         return;
       }
       const existing = activeObj.hyperlink || 'https://';
@@ -241,27 +344,18 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       pushSnapshotToUndo();
 
       const socket = getSocket();
-      socket.emit('canvas:object:modified', { roomId, object: activeObj.toObject(['id', 'hyperlink']) });
-      socket.emit('canvas:sync', { roomId, canvasJSON: canvas.toJSON(['hyperlink']) });
+      socket.emit('canvas:object:modified', {
+        roomId,
+        object: activeObj.toObject(['id', 'hyperlink', 'isCheckpoint']),
+      });
+      socket.emit('canvas:sync', {
+        roomId,
+        canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
+      });
     },
+  }), [addImageFromDataURL, undo, redo, deleteSelected, saveCheckpoint, emitObjectAdded, recordSnapshot, pushSnapshotToUndo, roomId]);
 
-    clearCanvas() {
-      const canvas = fabricRef.current;
-      if (!canvas) return;
-      recordSnapshot();
-
-      canvas.clear();
-      canvas.backgroundColor = '#1e1e2e';
-      canvas.renderAll();
-
-      pushSnapshotToUndo();
-
-      const socket = getSocket();
-      socket.emit('canvas:sync', { roomId, canvasJSON: canvas.toJSON(['hyperlink']) });
-    },
-  }), [activeColor, addImageFromDataURL, undo, redo, deleteSelected, roomId, emitObjectAdded, recordSnapshot, pushSnapshotToUndo]);
-
-  // ── Initialise Fabric canvas ─────────────────────────────────────────────
+  // ── 1. Persistent Canvas Lifecycle (Mounts ONCE) ──────────────────────────
   useEffect(() => {
     if (!containerRef.current) return;
 
@@ -270,7 +364,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       width: el.clientWidth,
       height: el.clientHeight,
       backgroundColor: '#1e1e2e',
-      selection: isEditor,
+      selection: isEditorRef.current,
       isDrawingMode: false,
     });
     fabricRef.current = canvas;
@@ -282,7 +376,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     });
     observer.observe(el);
 
-    // Track starting a mouse action (stroke, selection, move) to snapshot state
+    // Track mouse down
     canvas.on('mouse:down', (opt) => {
       if (opt.e.altKey) {
         canvas._isDragging = true;
@@ -302,7 +396,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas.setViewportTransform(vpt);
       canvas._lastPosX = opt.e.clientX;
       canvas._lastPosY = opt.e.clientY;
-      reportViewport(canvas);
+      onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: canvas.getZoom() });
     });
     canvas.on('mouse:up', () => { canvas._isDragging = false; });
 
@@ -315,10 +409,11 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
       opt.e.preventDefault();
       opt.e.stopPropagation();
-      reportViewport(canvas);
+      const vpt = canvas.viewportTransform;
+      onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
     });
 
-    // ── 2-Finger Touch Pinch Zoom & Pan (Mobile devices) ───────────────────
+    // ── Mobile 2-Finger Touch Pinch Zoom & Pan ─────────────────────────────
     let touchStartDist = 0;
     let touchStartZoom = 1;
     let touchStartCenter = null;
@@ -352,7 +447,6 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         const newZoom = Math.max(0.2, Math.min(10, touchStartZoom * factor));
         canvas.zoomToPoint(touchStartCenter, newZoom);
 
-        // Pan with 2 fingers
         const currentCenter = {
           x: (t1.clientX + t2.clientX) / 2,
           y: (t1.clientY + t2.clientY) / 2,
@@ -361,7 +455,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         vpt[4] = touchStartPan.x + (currentCenter.x - touchStartCenter.x);
         vpt[5] = touchStartPan.y + (currentCenter.y - touchStartCenter.y);
         canvas.setViewportTransform(vpt);
-        reportViewport(canvas);
+        onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: newZoom });
       }
     };
 
@@ -369,7 +463,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       if (e.touches.length < 2) {
         touchStartCenter = null;
         touchStartDist = 0;
-        if (wasDrawingBeforeTouch) {
+        if (wasDrawingBeforeTouch && isEditorRef.current) {
           canvas.isDrawingMode = true;
         }
       }
@@ -387,7 +481,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const handleDragOver = (e) => { e.preventDefault(); };
     const handleDrop = (e) => {
       e.preventDefault();
-      if (!isEditor) return;
+      if (!isEditorRef.current) return;
       const file = e.dataTransfer?.files?.[0];
       if (file && file.type.startsWith('image/')) {
         const reader = new FileReader();
@@ -396,9 +490,9 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       }
     };
 
-    // Clipboard Paste (Ctrl+V) image support
+    // Clipboard Paste (Ctrl+V)
     const handlePaste = (e) => {
-      if (!isEditor) return;
+      if (!isEditorRef.current) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (let i = 0; i < items.length; i++) {
@@ -412,13 +506,13 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       }
     };
 
-    // Keyboard Shortcuts: Delete, Backspace, Ctrl+Z (Undo), Ctrl+Y (Redo)
+    // Keyboard Shortcuts
     const handleKeyDown = (e) => {
-      if (!isEditor) return;
+      if (!isEditorRef.current) return;
       if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
 
       const activeObj = canvas.getActiveObject();
-      if (activeObj && activeObj.isEditing) return; // ignore when editing text
+      if (activeObj && activeObj.isEditing) return;
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
@@ -453,12 +547,33 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       el.removeEventListener('drop', handleDrop);
       window.removeEventListener('paste', handlePaste);
       window.removeEventListener('keydown', handleKeyDown);
-      canvas.dispose();
+      canvas.dispose(); // Only disposes on unmount!
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isEditor, addImageFromDataURL, deleteSelected, undo, redo, recordSnapshot]);
+  }, []); // Run ONCE on mount!
 
-  // ── Load initial canvas state from server ─────────────────────────────────
+  // ── 2. Handle Role Transition (Observer -> Editor) Without Canvas Reset ────
+  useEffect(() => {
+    const canvas = fabricRef.current;
+    if (!canvas) return;
+
+    canvas.selection = isEditor;
+    canvas.getObjects().forEach((o) => {
+      if (o.isCheckpoint) {
+        o.selectable = false;
+        o.evented = false;
+      } else {
+        o.selectable = isEditor;
+        o.evented = isEditor || !!o.hyperlink;
+        if (!isEditor && o.hyperlink) {
+          o.hoverCursor = 'pointer';
+        }
+      }
+    });
+    canvas.renderAll();
+  }, [isEditor]);
+
+  // ── 3. Load initial canvas state from server ──────────────────────────────
   useEffect(() => {
     if (!fabricRef.current || !initialCanvas) return;
     if (Array.isArray(initialCanvas) && initialCanvas.length === 0) return;
@@ -468,21 +583,37 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         ? { objects: initialCanvas }
         : initialCanvas
     ).then(() => {
-      fabricRef.current.renderAll();
+      const canvas = fabricRef.current;
+      if (canvas) {
+        canvas.selection = isEditorRef.current;
+        canvas.getObjects().forEach((o) => {
+          if (o.isCheckpoint) {
+            o.selectable = false;
+            o.evented = false;
+          } else {
+            o.selectable = isEditorRef.current;
+            o.evented = isEditorRef.current || !!o.hyperlink;
+            if (!isEditorRef.current && o.hyperlink) o.hoverCursor = 'pointer';
+          }
+        });
+        canvas.renderAll();
+      }
       isSyncing.current = false;
     });
   }, [initialCanvas]);
 
-  // ── Tool mode switching ───────────────────────────────────────────────────
+  // ── 4. Tool mode switching (Pen, Eraser, Select) ──────────────────────────
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
     canvas.isDrawingMode = false;
     canvas.selection = isEditor;
-    canvas.getObjects().forEach((o) => { o.selectable = isEditor; o.evented = isEditor; });
 
-    if (!isEditor) { canvas.renderAll(); return; }
+    if (!isEditor) {
+      canvas.renderAll();
+      return;
+    }
 
     switch (activeTool) {
       case 'pen':
@@ -494,7 +625,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       case 'eraser':
         canvas.isDrawingMode = true;
         canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-        canvas.freeDrawingBrush.color = '#1e1e2e'; // paint over with canvas colour
+        canvas.freeDrawingBrush.color = '#1e1e2e'; // Dark-out stroke
         canvas.freeDrawingBrush.width = brushSize * 4;
         break;
       case 'select':
@@ -505,35 +636,44 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     canvas.renderAll();
   }, [activeTool, activeColor, brushSize, isEditor]);
 
-  // ── Socket event wiring ───────────────────────────────────────────────────
+  // ── 5. Socket real-time event listeners ───────────────────────────────────
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
     function onObjectAdded({ target }) {
-      if (!isEditor || isSyncing.current || isHistoryAction.current || !target) return;
+      if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
       pushSnapshotToUndo();
       emitObjectAdded(target);
     }
     function onObjectModified({ target }) {
-      if (!isEditor || isSyncing.current || isHistoryAction.current || !target) return;
+      if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
       pushSnapshotToUndo();
       const socket = getSocket();
-      socket.emit('canvas:object:modified', { roomId, object: target.toObject(['id', 'hyperlink']) });
-      socket.emit('canvas:sync', { roomId, canvasJSON: canvas.toJSON(['hyperlink']) });
+      socket.emit('canvas:object:modified', {
+        roomId,
+        object: target.toObject(['id', 'hyperlink', 'isCheckpoint']),
+      });
+      socket.emit('canvas:sync', {
+        roomId,
+        canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
+      });
     }
     function onObjectRemoved({ target }) {
-      if (!isEditor || isSyncing.current || isHistoryAction.current || !target) return;
+      if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
       pushSnapshotToUndo();
       const socket = getSocket();
       socket.emit('canvas:object:removed', { roomId });
-      socket.emit('canvas:sync', { roomId, canvasJSON: canvas.toJSON(['hyperlink']) });
+      socket.emit('canvas:sync', {
+        roomId,
+        canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
+      });
     }
 
     function onMouseDown(opt) {
       const target = opt.target;
       if (target && target.hyperlink) {
-        if (!isEditor || opt.e.ctrlKey || opt.e.metaKey) {
+        if (!isEditorRef.current || opt.e.ctrlKey || opt.e.metaKey) {
           window.open(target.hyperlink, '_blank', 'noopener,noreferrer');
         }
       }
@@ -544,20 +684,24 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     canvas.on('object:removed', onObjectRemoved);
     canvas.on('mouse:down', onMouseDown);
 
-    // Receive full canvas sync from peers
+    // Full canvas sync from peers or checkpoint broadcast
     const socket = getSocket();
     const handleSync = ({ canvasJSON }) => {
       isSyncing.current = true;
       canvas.loadFromJSON(canvasJSON).then(() => {
+        canvas.selection = isEditorRef.current;
+        canvas.getObjects().forEach((o) => {
+          if (o.isCheckpoint) {
+            o.selectable = false;
+            o.evented = false;
+          } else {
+            o.selectable = isEditorRef.current;
+            o.evented = isEditorRef.current || !!o.hyperlink;
+            if (!isEditorRef.current && o.hyperlink) o.hoverCursor = 'pointer';
+          }
+        });
         canvas.renderAll();
         isSyncing.current = false;
-        if (!isEditor) {
-          canvas.getObjects().forEach((o) => {
-            o.selectable = false;
-            o.evented = !!o.hyperlink;
-            if (o.hyperlink) o.hoverCursor = 'pointer';
-          });
-        }
       });
     };
     socket.on('canvas:sync', handleSync);
@@ -569,23 +713,21 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas.off('mouse:down', onMouseDown);
       socket.off('canvas:sync', handleSync);
     };
-  }, [roomId, isEditor, emitObjectAdded, pushSnapshotToUndo]);
+  }, [roomId, emitObjectAdded, pushSnapshotToUndo]);
 
-  // ── Cursor broadcast ──────────────────────────────────────────────────────
+  // ── 6. Cursor Presence Broadcast ──────────────────────────────────────────
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
-    canvas.on('mouse:move', ({ e }) => {
+    const handleMouseMove = ({ e }) => {
       const pt = canvas.getPointer(e);
       getSocket().emit('cursor:move', { x: pt.x, y: pt.y });
-    });
+    };
+    canvas.on('mouse:move', handleMouseMove);
+    return () => {
+      canvas.off('mouse:move', handleMouseMove);
+    };
   }, []);
-
-  // ── Viewport reporting helper ─────────────────────────────────────────────
-  function reportViewport(canvas) {
-    const vpt = canvas.viewportTransform;
-    onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: canvas.getZoom() });
-  }
 
   return (
     <div ref={containerRef} className="w-full h-full relative">
