@@ -138,7 +138,29 @@ export default function Toolbar({
 
       <Divider />
 
-      {/* Clear */}
+      {/* Undo & Redo */}
+      <ToolBtn
+        icon="↩"
+        label="Undo (Ctrl+Z)"
+        onClick={() => canvasRef.current?.undo()}
+      />
+      <ToolBtn
+        icon="↪"
+        label="Redo (Ctrl+Y)"
+        onClick={() => canvasRef.current?.redo()}
+      />
+
+      {/* Delete Selected Object */}
+      <ToolBtn
+        icon="❌"
+        label="Delete Selected (Del)"
+        onClick={() => canvasRef.current?.deleteSelected()}
+        danger
+      />
+
+      <Divider />
+
+      {/* Clear All */}
       <ToolBtn icon="🗑" label="Clear Canvas" onClick={handleClear} danger />
     </aside>
   );
