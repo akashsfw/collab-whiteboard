@@ -16,6 +16,7 @@ export default function RoomPage() {
   const [role, setRole] = useState('observer');       // 'observer' | 'editor'
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [copied, setCopied] = useState(false);
 
   // Shared state between Canvas and MediaOverlayLayer
   const [activeTool, setActiveTool] = useState('select');
@@ -136,21 +137,21 @@ export default function RoomPage() {
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-canvas">
-      {/* ── Top Bar ─────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-4 py-2 bg-surface border-b border-white/10 z-20 shrink-0">
-        <div className="flex items-center gap-3">
-          <span className="text-white font-bold text-lg">
+      {/* ── Top Bar (Mobile-responsive) ─────────────────────────────────── */}
+      <header className="flex items-center justify-between px-3 sm:px-4 py-2 bg-surface border-b border-white/10 z-20 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+          <span className="text-white font-bold text-base sm:text-lg shrink-0">
             Collab<span className="text-accent">Board</span>
           </span>
-          <span className="text-muted text-xs font-mono bg-canvas px-2 py-1 rounded">
+          <span className="hidden sm:inline text-muted text-xs font-mono bg-canvas px-2 py-1 rounded truncate max-w-[120px]">
             {roomId}
           </span>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
           {/* Role badge */}
           <span
-            className={`text-xs font-semibold px-3 py-1 rounded-full ${
+            className={`text-[11px] sm:text-xs font-semibold px-2 sm:px-3 py-1 rounded-full shrink-0 ${
               isEditor
                 ? 'bg-green-900/60 text-green-300 border border-green-700'
                 : 'bg-yellow-900/60 text-yellow-300 border border-yellow-700'
@@ -161,19 +162,25 @@ export default function RoomPage() {
 
           {/* Copy link */}
           <button
-            onClick={() => { navigator.clipboard.writeText(window.location.href); }}
-            className="text-xs text-muted hover:text-white border border-white/10 px-3 py-1 rounded-lg transition-colors"
+            onClick={() => {
+              navigator.clipboard.writeText(window.location.href);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 2000);
+            }}
+            title="Copy Room Link"
+            className="text-xs text-muted hover:text-white border border-white/10 px-2 sm:px-3 py-1 rounded-lg transition-colors flex items-center gap-1 shrink-0"
           >
-            Copy Link
+            <span>{copied ? '✓' : '🔗'}</span>
+            <span className="hidden sm:inline">{copied ? 'Copied!' : 'Copy Link'}</span>
           </button>
 
           {/* Enter editor mode */}
           {!isEditor && (
             <button
               onClick={() => setShowPasswordModal(true)}
-              className="bg-accent hover:bg-accent-hover text-white text-sm font-medium px-4 py-1.5 rounded-lg transition-colors"
+              className="bg-accent hover:bg-accent-hover text-white text-xs sm:text-sm font-medium px-2.5 sm:px-4 py-1.5 rounded-lg transition-colors shrink-0"
             >
-              🔑 Enter Password to Edit
+              🔑 <span className="hidden sm:inline">Enter Password to </span>Edit
             </button>
           )}
         </div>

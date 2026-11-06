@@ -318,6 +318,71 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       reportViewport(canvas);
     });
 
+    // ── 2-Finger Touch Pinch Zoom & Pan (Mobile devices) ───────────────────
+    let touchStartDist = 0;
+    let touchStartZoom = 1;
+    let touchStartCenter = null;
+    let touchStartPan = null;
+    let wasDrawingBeforeTouch = false;
+
+    const handleTouchStart = (e) => {
+      if (e.touches.length === 2) {
+        wasDrawingBeforeTouch = canvas.isDrawingMode;
+        canvas.isDrawingMode = false;
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        touchStartDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        touchStartZoom = canvas.getZoom();
+        touchStartCenter = {
+          x: (t1.clientX + t2.clientX) / 2,
+          y: (t1.clientY + t2.clientY) / 2,
+        };
+        const vpt = canvas.viewportTransform;
+        touchStartPan = { x: vpt[4], y: vpt[5] };
+      }
+    };
+
+    const handleTouchMove = (e) => {
+      if (e.touches.length === 2 && touchStartCenter && touchStartDist > 0) {
+        e.preventDefault();
+        const t1 = e.touches[0];
+        const t2 = e.touches[1];
+        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        const factor = dist / touchStartDist;
+        const newZoom = Math.max(0.2, Math.min(10, touchStartZoom * factor));
+        canvas.zoomToPoint(touchStartCenter, newZoom);
+
+        // Pan with 2 fingers
+        const currentCenter = {
+          x: (t1.clientX + t2.clientX) / 2,
+          y: (t1.clientY + t2.clientY) / 2,
+        };
+        const vpt = canvas.viewportTransform.slice();
+        vpt[4] = touchStartPan.x + (currentCenter.x - touchStartCenter.x);
+        vpt[5] = touchStartPan.y + (currentCenter.y - touchStartCenter.y);
+        canvas.setViewportTransform(vpt);
+        reportViewport(canvas);
+      }
+    };
+
+    const handleTouchEnd = (e) => {
+      if (e.touches.length < 2) {
+        touchStartCenter = null;
+        touchStartDist = 0;
+        if (wasDrawingBeforeTouch) {
+          canvas.isDrawingMode = true;
+        }
+      }
+    };
+
+    const upperEl = canvas.upperCanvasEl;
+    if (upperEl) {
+      upperEl.addEventListener('touchstart', handleTouchStart, { passive: true });
+      upperEl.addEventListener('touchmove', handleTouchMove, { passive: false });
+      upperEl.addEventListener('touchend', handleTouchEnd, { passive: true });
+      upperEl.addEventListener('touchcancel', handleTouchEnd, { passive: true });
+    }
+
     // Drag-and-drop image upload
     const handleDragOver = (e) => { e.preventDefault(); };
     const handleDrop = (e) => {
@@ -378,6 +443,12 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     return () => {
       observer.disconnect();
+      if (upperEl) {
+        upperEl.removeEventListener('touchstart', handleTouchStart);
+        upperEl.removeEventListener('touchmove', handleTouchMove);
+        upperEl.removeEventListener('touchend', handleTouchEnd);
+        upperEl.removeEventListener('touchcancel', handleTouchEnd);
+      }
       el.removeEventListener('dragover', handleDragOver);
       el.removeEventListener('drop', handleDrop);
       window.removeEventListener('paste', handlePaste);

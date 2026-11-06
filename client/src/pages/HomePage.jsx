@@ -29,18 +29,18 @@ export default function HomePage() {
   return (
     <div className="min-h-screen flex flex-col items-center justify-center bg-canvas px-4">
       {/* Hero */}
-      <div className="mb-10 text-center">
-        <h1 className="text-5xl font-extrabold text-white tracking-tight mb-3">
+      <div className="mb-8 sm:mb-10 text-center">
+        <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight mb-2 sm:mb-3">
           Collab<span className="text-accent">Board</span>
         </h1>
-        <p className="text-muted text-lg max-w-md">
+        <p className="text-muted text-sm sm:text-lg max-w-md px-2">
           A real-time collaborative whiteboard with YouTube embeds, image uploads,
           and password-protected editor access.
         </p>
       </div>
 
       {/* Create Room Card */}
-      <div className="bg-surface border border-white/10 rounded-2xl shadow-2xl p-8 w-full max-w-sm">
+      <div className="bg-surface border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-8 w-full max-w-sm">
         <h2 className="text-xl font-semibold text-white mb-1">Create a Room</h2>
         <p className="text-muted text-sm mb-6">
           Anyone with the link can observe. Only those with your password can draw.

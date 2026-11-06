@@ -1,4 +1,4 @@
-import { useRef } from 'react';
+import { useRef, useState } from 'react';
 
 const TOOLS = [
   { id: 'select', icon: '↖', label: 'Select' },
@@ -23,6 +23,8 @@ export default function Toolbar({
   onAddYoutube,
 }) {
   const fileInputRef = useRef(null);
+  const [showMobileColors, setShowMobileColors] = useState(false);
+  const [mobileCollapsed, setMobileCollapsed] = useState(false);
 
   function handleToolClick(toolId) {
     if (toolId === 'rect' || toolId === 'circle') {
@@ -52,72 +54,229 @@ export default function Toolbar({
   }
 
   return (
-    <aside className="flex flex-col items-center gap-3 w-16 bg-surface border-r border-white/10 py-4 z-10 shrink-0 overflow-y-auto">
-      {/* Drawing tools */}
-      {TOOLS.map((t) => (
-        <ToolBtn
-          key={t.id}
-          icon={t.icon}
-          label={t.label}
-          active={activeTool === t.id}
-          onClick={() => handleToolClick(t.id)}
-        />
-      ))}
-
-      <Divider />
-
-      {/* Color palette */}
-      <div className="flex flex-col gap-1.5 items-center">
-        {COLORS.map((c) => (
-          <button
-            key={c}
-            title={c}
-            onClick={() => setActiveColor(c)}
-            style={{ backgroundColor: c }}
-            className={`w-6 h-6 rounded-full border-2 transition-transform ${
-              activeColor === c
-                ? 'border-accent scale-125'
-                : 'border-transparent hover:scale-110'
-            }`}
+    <>
+      {/* ── DESKTOP SIDEBAR (>= md) ────────────────────────────────────────── */}
+      <aside className="hidden md:flex flex-col items-center gap-2.5 w-16 bg-surface border-r border-white/10 py-3 z-20 shrink-0 overflow-y-auto">
+        {TOOLS.map((t) => (
+          <ToolBtn
+            key={t.id}
+            icon={t.icon}
+            label={t.label}
+            active={activeTool === t.id}
+            onClick={() => handleToolClick(t.id)}
           />
         ))}
-        {/* Custom colour picker */}
-        <label title="Custom colour" className="cursor-pointer">
-          <span className="text-lg">🎨</span>
+
+        <Divider />
+
+        {/* Color palette */}
+        <div className="flex flex-col gap-1.5 items-center">
+          {COLORS.map((c) => (
+            <button
+              key={c}
+              title={c}
+              onClick={() => setActiveColor(c)}
+              style={{ backgroundColor: c }}
+              className={`w-6 h-6 rounded-full border-2 transition-transform ${
+                activeColor === c
+                  ? 'border-accent scale-125'
+                  : 'border-transparent hover:scale-110'
+              }`}
+            />
+          ))}
+          <label title="Custom colour" className="cursor-pointer">
+            <span className="text-lg">🎨</span>
+            <input
+              type="color"
+              className="hidden"
+              value={activeColor}
+              onChange={(e) => setActiveColor(e.target.value)}
+            />
+          </label>
+        </div>
+
+        <Divider />
+
+        {/* Brush size */}
+        <div className="flex flex-col items-center gap-1 w-12">
+          <span className="text-muted text-[10px]">Size</span>
           <input
-            type="color"
-            className="hidden"
-            value={activeColor}
-            onChange={(e) => setActiveColor(e.target.value)}
+            type="range"
+            min={1}
+            max={40}
+            value={brushSize}
+            onChange={(e) => setBrushSize(Number(e.target.value))}
+            className="w-10 accent-accent"
           />
-        </label>
-      </div>
+          <span className="text-muted text-[10px]">{brushSize}px</span>
+        </div>
 
-      <Divider />
+        <Divider />
 
-      {/* Brush size */}
-      <div className="flex flex-col items-center gap-1 w-12">
-        <span className="text-muted text-[10px]">Size</span>
-        <input
-          type="range"
-          min={1}
-          max={40}
-          value={brushSize}
-          onChange={(e) => setBrushSize(Number(e.target.value))}
-          className="w-10 accent-accent"
-          style={{ writingMode: 'horizontal-tb' }}
+        {/* Media / Rich Tools */}
+        <ToolBtn
+          icon="🖼"
+          label="Upload Image"
+          onClick={() => fileInputRef.current?.click()}
         />
-        <span className="text-muted text-[10px]">{brushSize}px</span>
+        <ToolBtn icon="▶" label="Embed YouTube" onClick={onAddYoutube} />
+        <ToolBtn
+          icon="🔗"
+          label="Add Link to Selection"
+          onClick={() => canvasRef.current?.addHyperlinkToSelected()}
+        />
+
+        <Divider />
+
+        {/* Undo, Redo, Delete */}
+        <ToolBtn
+          icon="↩"
+          label="Undo (Ctrl+Z)"
+          onClick={() => canvasRef.current?.undo()}
+        />
+        <ToolBtn
+          icon="↪"
+          label="Redo (Ctrl+Y)"
+          onClick={() => canvasRef.current?.redo()}
+        />
+        <ToolBtn
+          icon="❌"
+          label="Delete Selected (Del)"
+          onClick={() => canvasRef.current?.deleteSelected()}
+          danger
+        />
+
+        <Divider />
+
+        {/* Clear */}
+        <ToolBtn icon="🗑" label="Clear Canvas" onClick={handleClear} danger />
+      </aside>
+
+      {/* ── MOBILE FLOATING BOTTOM BAR (< md) ──────────────────────────────── */}
+      <div className="md:hidden fixed bottom-3 left-2 right-2 z-30 flex flex-col items-center gap-2 pointer-events-none">
+        {/* Mobile Color & Brush Popover */}
+        {showMobileColors && !mobileCollapsed && (
+          <div className="pointer-events-auto bg-surface/95 backdrop-blur-xl border border-white/10 rounded-2xl p-3 shadow-2xl flex flex-col gap-2 w-full max-w-sm animate-in fade-in slide-in-from-bottom-2">
+            <div className="flex items-center justify-between">
+              <span className="text-xs text-muted font-medium">Palette & Brush</span>
+              <button
+                onClick={() => setShowMobileColors(false)}
+                className="text-xs text-muted hover:text-white px-2 py-0.5"
+              >
+                ✕
+              </button>
+            </div>
+            {/* Color circles */}
+            <div className="flex items-center justify-between gap-1 overflow-x-auto py-1">
+              {COLORS.map((c) => (
+                <button
+                  key={c}
+                  onClick={() => { setActiveColor(c); setShowMobileColors(false); }}
+                  style={{ backgroundColor: c }}
+                  className={`w-7 h-7 rounded-full border-2 shrink-0 ${
+                    activeColor === c ? 'border-accent scale-110' : 'border-transparent'
+                  }`}
+                />
+              ))}
+              <label className="cursor-pointer shrink-0 ml-1">
+                <span className="text-xl">🎨</span>
+                <input
+                  type="color"
+                  className="hidden"
+                  value={activeColor}
+                  onChange={(e) => setActiveColor(e.target.value)}
+                />
+              </label>
+            </div>
+            {/* Brush slider */}
+            <div className="flex items-center gap-3 pt-1 border-t border-white/10">
+              <span className="text-xs text-muted shrink-0">Size: {brushSize}px</span>
+              <input
+                type="range"
+                min={1}
+                max={40}
+                value={brushSize}
+                onChange={(e) => setBrushSize(Number(e.target.value))}
+                className="flex-1 accent-accent"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Floating action row */}
+        <div className="pointer-events-auto bg-surface/95 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl p-1 flex items-center justify-between max-w-full overflow-hidden">
+          {/* Collapse/Expand Toggle */}
+          <button
+            onClick={() => setMobileCollapsed((prev) => !prev)}
+            title={mobileCollapsed ? 'Show Toolbar' : 'Hide Toolbar'}
+            className="w-8 h-10 flex items-center justify-center text-muted hover:text-white shrink-0 border-r border-white/10 mr-1"
+          >
+            {mobileCollapsed ? '▲' : '▼'}
+          </button>
+
+          {!mobileCollapsed && (
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar py-0.5 px-1">
+              {TOOLS.map((t) => (
+                <ToolBtn
+                  key={t.id}
+                  icon={t.icon}
+                  label={t.label}
+                  active={activeTool === t.id}
+                  onClick={() => handleToolClick(t.id)}
+                />
+              ))}
+
+              {/* Color popover trigger */}
+              <button
+                onClick={() => setShowMobileColors((prev) => !prev)}
+                title="Color & Size"
+                className="w-10 h-10 rounded-xl flex items-center justify-center relative shrink-0"
+              >
+                <span
+                  style={{ backgroundColor: activeColor }}
+                  className="w-5 h-5 rounded-full border-2 border-white shadow-sm"
+                />
+              </button>
+
+              <ToolBtn
+                icon="🖼"
+                label="Image"
+                onClick={() => fileInputRef.current?.click()}
+              />
+              <ToolBtn icon="▶" label="YouTube" onClick={onAddYoutube} />
+              <ToolBtn
+                icon="🔗"
+                label="Link"
+                onClick={() => canvasRef.current?.addHyperlinkToSelected()}
+              />
+              <ToolBtn
+                icon="↩"
+                label="Undo"
+                onClick={() => canvasRef.current?.undo()}
+              />
+              <ToolBtn
+                icon="↪"
+                label="Redo"
+                onClick={() => canvasRef.current?.redo()}
+              />
+              <ToolBtn
+                icon="❌"
+                label="Delete"
+                onClick={() => canvasRef.current?.deleteSelected()}
+                danger
+              />
+              <ToolBtn
+                icon="🗑"
+                label="Clear"
+                onClick={handleClear}
+                danger
+              />
+            </div>
+          )}
+        </div>
       </div>
 
-      <Divider />
-
-      {/* Image upload */}
-      <ToolBtn
-        icon="🖼"
-        label="Upload Image"
-        onClick={() => fileInputRef.current?.click()}
-      />
+      {/* Hidden File Input for Image Upload */}
       <input
         ref={fileInputRef}
         type="file"
@@ -125,44 +284,7 @@ export default function Toolbar({
         className="hidden"
         onChange={handleImageUpload}
       />
-
-      {/* YouTube embed */}
-      <ToolBtn icon="▶" label="Embed YouTube" onClick={onAddYoutube} />
-
-      {/* Add Hyperlink to Selected Object */}
-      <ToolBtn
-        icon="🔗"
-        label="Add Link to Selection"
-        onClick={() => canvasRef.current?.addHyperlinkToSelected()}
-      />
-
-      <Divider />
-
-      {/* Undo & Redo */}
-      <ToolBtn
-        icon="↩"
-        label="Undo (Ctrl+Z)"
-        onClick={() => canvasRef.current?.undo()}
-      />
-      <ToolBtn
-        icon="↪"
-        label="Redo (Ctrl+Y)"
-        onClick={() => canvasRef.current?.redo()}
-      />
-
-      {/* Delete Selected Object */}
-      <ToolBtn
-        icon="❌"
-        label="Delete Selected (Del)"
-        onClick={() => canvasRef.current?.deleteSelected()}
-        danger
-      />
-
-      <Divider />
-
-      {/* Clear All */}
-      <ToolBtn icon="🗑" label="Clear Canvas" onClick={handleClear} danger />
-    </aside>
+    </>
   );
 }
 
@@ -171,11 +293,11 @@ function ToolBtn({ icon, label, active, onClick, danger }) {
     <button
       title={label}
       onClick={onClick}
-      className={`w-10 h-10 rounded-xl flex items-center justify-center text-lg transition-all
+      className={`w-10 h-10 rounded-xl flex items-center justify-center text-base shrink-0 transition-all active:scale-95
         ${active
           ? 'bg-accent text-white shadow-lg shadow-accent/40'
           : danger
-          ? 'text-red-400 hover:bg-red-900/40'
+          ? 'text-red-400 hover:bg-red-900/40 active:bg-red-900/60'
           : 'text-muted hover:bg-white/10 hover:text-white'
         }`}
     >
@@ -185,5 +307,5 @@ function ToolBtn({ icon, label, active, onClick, danger }) {
 }
 
 function Divider() {
-  return <div className="w-8 border-t border-white/10 my-1" />;
+  return <div className="w-8 border-t border-white/10 my-1 shrink-0" />;
 }
