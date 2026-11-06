@@ -1,4 +1,4 @@
-const BASE = import.meta.env.VITE_SERVER_URL || 'http://localhost:4000';
+const BASE = import.meta.env.VITE_SERVER_URL || '';
 
 /** POST /api/rooms — create room, returns { roomId } */
 export async function createRoom(password) {
