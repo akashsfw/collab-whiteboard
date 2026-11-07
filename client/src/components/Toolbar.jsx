@@ -1,4 +1,5 @@
 import { useRef, useState } from 'react';
+import { compressImage } from '../lib/imageCompressor.js';
 
 const TOOLS = [
   { id: 'select', icon: '↖', label: 'Select & Move' },
@@ -44,13 +45,17 @@ export default function Toolbar({
     }
   }
 
-  function handleImageUpload(e) {
+  async function handleImageUpload(e) {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => canvasRef.current?.addImageFromDataURL(ev.target.result);
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    try {
+      const compressedDataUrl = await compressImage(file, 1200, 0.82);
+      canvasRef.current?.addImageFromDataURL(compressedDataUrl);
+    } catch (err) {
+      console.error('Image upload failed:', err);
+    } finally {
+      e.target.value = '';
+    }
   }
 
   function handleSaveCheckpoint() {

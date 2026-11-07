@@ -7,22 +7,33 @@ import {
 } from 'react';
 import * as fabric from 'fabric';
 import { getSocket } from '../lib/socket.js';
+import { compressImage } from '../lib/imageCompressor.js';
+
+/**
+ * Helper to safely extract clientX and clientY from mouse, pointer, or touch events.
+ * Crucial for mobile: standard TouchEvent has clientX in e.touches[0] or e.changedTouches[0].
+ */
+function getPointerPos(e) {
+  if (!e) return { x: 0, y: 0 };
+  if (e.touches && e.touches.length > 0) {
+    return { x: e.touches[0].clientX ?? 0, y: e.touches[0].clientY ?? 0 };
+  }
+  if (e.changedTouches && e.changedTouches.length > 0) {
+    return { x: e.changedTouches[0].clientX ?? 0, y: e.changedTouches[0].clientY ?? 0 };
+  }
+  return { x: e.clientX ?? 0, y: e.clientY ?? 0 };
+}
 
 /**
  * WhiteboardCanvas
  *
  * Real-time collaborative infinite canvas powered by Fabric.js v6.
- * Features:
- *   - Infinite coordinate space & smooth panning (Hand tool, Space+Drag, Alt+Drag, Middle Click)
- *   - Dynamic infinite grid alignment
- *   - Immovable, unclickable permanent checkpoints (Flatten Canvas)
- *   - Drawing tools (pen, eraser, shapes, text)
- *   - Image uploading & clipboard paste
- *   - Hyperlinks on objects
- *   - Undo / Redo history
- *   - Delete selected objects
- *   - Touch support: 1-finger draw, 2-finger pinch-to-zoom & pan
- *   - Real-time Socket.io synchronization
+ * Mobile & Multi-image hardened:
+ *   - Auto-compresses camera & upload photos to max 1200px (prevents WebGL/Canvas memory crashes)
+ *   - Safe touch coordinate extraction (eliminates NaN viewport corruption)
+ *   - Smooth 2-finger pinch-to-zoom and pan
+ *   - Incremental socket object sync (never reloads/wipes canvas during active drawing)
+ *   - Immovable checkpoints, infinite pan, undo/redo, responsive resize.
  */
 const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   {
@@ -40,8 +51,9 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   const fabricRef = useRef(null);   // Single persistent fabric.Canvas instance
   const isSyncing = useRef(false);  // Prevent broadcast echo loops
   const spacePressed = useRef(false);
+  const hasLoadedInitial = useRef(false);
 
-  // Mutable refs so callbacks always access latest values without re-mounting
+  // Mutable refs for up-to-date values without re-mounting
   const isEditorRef = useRef(isEditor);
   isEditorRef.current = isEditor;
 
@@ -54,7 +66,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
   const brushSizeRef = useRef(brushSize);
   brushSizeRef.current = brushSize;
 
-  // ── Undo / Redo Stacks ───────────────────────────────────────────────────
+  // ── Undo / Redo Stacks (Capped at 20 to protect mobile RAM) ───────────────
   const undoStack = useRef([]);
   const redoStack = useRef([]);
   const isHistoryAction = useRef(false);
@@ -62,27 +74,30 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
   const recordSnapshot = useCallback(() => {
     if (!fabricRef.current || isSyncing.current || isHistoryAction.current) return;
-    pendingSnapshot.current = JSON.stringify(fabricRef.current.toJSON(['hyperlink', 'isCheckpoint']));
+    try {
+      pendingSnapshot.current = JSON.stringify(fabricRef.current.toJSON(['id', 'hyperlink', 'isCheckpoint']));
+    } catch {
+      pendingSnapshot.current = null;
+    }
   }, []);
 
   const pushSnapshotToUndo = useCallback(() => {
     if (!pendingSnapshot.current || isSyncing.current || isHistoryAction.current) return;
     undoStack.current.push(pendingSnapshot.current);
-    if (undoStack.current.length > 50) undoStack.current.shift();
+    if (undoStack.current.length > 20) undoStack.current.shift();
     redoStack.current = [];
     pendingSnapshot.current = null;
   }, []);
 
-  // ── Helper: Broadcast object changes ─────────────────────────────────────
+  // ── Helper: Broadcast incremental object additions ────────────────────────
   const emitObjectAdded = useCallback((obj) => {
-    if (isSyncing.current || !fabricRef.current) return;
+    if (isSyncing.current || !fabricRef.current || !obj) return;
+    if (!obj.id) obj.id = crypto.randomUUID();
     const socket = getSocket();
     socket.emit('canvas:object:added', {
       roomId,
       object: obj.toObject(['id', 'hyperlink', 'isCheckpoint']),
     });
-    const json = fabricRef.current.toJSON(['hyperlink', 'isCheckpoint']);
-    socket.emit('canvas:sync', { roomId, canvasJSON: json });
   }, [roomId]);
 
   // Ensure checkpoint base images always stay at the bottom and are unselectable
@@ -103,16 +118,19 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     });
   }, []);
 
-  // ── Helper: Insert an image from Data URL onto canvas ────────────────────
-  const addImageFromDataURL = useCallback(async (dataUrl) => {
+  // ── Helper: Insert an image onto canvas with auto-compression ─────────────
+  const addImageFromDataURL = useCallback(async (rawSource) => {
     const canvas = fabricRef.current;
     if (!canvas || !isEditorRef.current) return;
 
     try {
       recordSnapshot();
 
+      // Compress and resize image to prevent mobile GPU canvas crashes
+      const dataUrl = await compressImage(rawSource, 1200, 0.82);
+
       const img = await fabric.FabricImage.fromURL(dataUrl);
-      const maxDim = Math.min(380, canvas.width * 0.75);
+      const maxDim = Math.min(360, (canvas.width || 400) * 0.75);
       img.scaleToWidth(maxDim);
 
       const vpt = canvas.viewportTransform || [1, 0, 0, 1, 0, 0];
@@ -121,6 +139,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       const centerY = (-vpt[5] + canvas.height / 2) / zoom;
 
       img.set({
+        id: crypto.randomUUID(),
         left: Math.max(20, centerX - (img.getScaledWidth() / 2)),
         top: Math.max(20, centerY - (img.getScaledHeight() / 2)),
         cornerColor: '#7c6af7',
@@ -148,7 +167,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     if (!canvas || undoStack.current.length === 0 || !isEditorRef.current) return;
 
     isHistoryAction.current = true;
-    const currentJson = JSON.stringify(canvas.toJSON(['hyperlink', 'isCheckpoint']));
+    const currentJson = JSON.stringify(canvas.toJSON(['id', 'hyperlink', 'isCheckpoint']));
     redoStack.current.push(currentJson);
 
     const prevJsonStr = undoStack.current.pop();
@@ -169,7 +188,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     if (!canvas || redoStack.current.length === 0 || !isEditorRef.current) return;
 
     isHistoryAction.current = true;
-    const currentJson = JSON.stringify(canvas.toJSON(['hyperlink', 'isCheckpoint']));
+    const currentJson = JSON.stringify(canvas.toJSON(['id', 'hyperlink', 'isCheckpoint']));
     undoStack.current.push(currentJson);
 
     const nextJsonStr = redoStack.current.pop();
@@ -192,7 +211,6 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const activeObjects = canvas.getActiveObjects();
     if (!activeObjects || activeObjects.length === 0) return;
 
-    // Do not allow deleting permanent checkpoint base
     const validObjects = activeObjects.filter((o) => !o.isCheckpoint);
     if (validObjects.length === 0) return;
 
@@ -201,17 +219,15 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     canvas.remove(...validObjects);
     enforceCheckpointLock(canvas);
     canvas.renderAll();
-
     pushSnapshotToUndo();
 
     const socket = getSocket();
-    socket.emit('canvas:sync', {
-      roomId,
-      canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
+    validObjects.forEach((obj) => {
+      socket.emit('canvas:object:removed', { roomId, objectId: obj.id });
     });
   }, [roomId, recordSnapshot, pushSnapshotToUndo, enforceCheckpointLock]);
 
-  // ── Hide / Unhide Selected Objects (Replaces destructive deletion) ────────
+  // ── Hide / Unhide Selected Objects ───────────────────────────────────────
   const toggleHideSelected = useCallback(() => {
     const canvas = fabricRef.current;
     if (!canvas || !isEditorRef.current) return;
@@ -232,13 +248,15 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     pushSnapshotToUndo();
 
     const socket = getSocket();
-    socket.emit('canvas:sync', {
-      roomId,
-      canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint', 'opacity']),
+    validObjects.forEach((obj) => {
+      socket.emit('canvas:object:modified', {
+        roomId,
+        object: obj.toObject(['id', 'hyperlink', 'isCheckpoint', 'opacity']),
+      });
     });
   }, [roomId, recordSnapshot, pushSnapshotToUndo]);
 
-  // ── Save Checkpoint (Flatten canvas into an immovable, locked base) ──────
+  // ── Save Checkpoint (Flatten canvas into an immovable background image) ──
   const saveCheckpoint = useCallback(async () => {
     const canvas = fabricRef.current;
     if (!canvas || !isEditorRef.current) return;
@@ -261,7 +279,6 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       isSyncing.current = true;
       canvas.discardActiveObject();
 
-      // Find the absolute bounding rectangle covering all objects on the infinite plane
       const allObjects = canvas.getObjects();
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
 
@@ -273,19 +290,17 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         if (br.top + br.height > maxY) maxY = br.top + br.height;
       });
 
-      // Add a 40px margin around content
       const pad = 40;
       minX = Math.floor(minX - pad);
       minY = Math.floor(minY - pad);
-      const width = Math.ceil(maxX - minX + pad * 2);
-      const height = Math.ceil(maxY - minY + pad * 2);
+      const width = Math.min(4000, Math.max(100, Math.ceil(maxX - minX + pad * 2)));
+      const height = Math.min(4000, Math.max(100, Math.ceil(maxY - minY + pad * 2)));
 
-      // Save viewport transform to restore afterward
       const savedVpt = canvas.viewportTransform.slice();
       canvas.setViewportTransform([1, 0, 0, 1, 0, 0]);
       canvas.renderAll();
 
-      const dataUrl = canvas.toDataURL({
+      const rawDataUrl = canvas.toDataURL({
         format: 'png',
         left: minX,
         top: minY,
@@ -296,16 +311,17 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
       canvas.setViewportTransform(savedVpt);
 
-      // Clear existing individual objects
-      canvas.clear();
+      // Compress checkpoint image to keep data under 300KB
+      const dataUrl = await compressImage(rawDataUrl, 1600, 0.85);
 
-      // Create a single completely immovable, non-evented checkpoint image
+      // Create new flat image BEFORE wiping canvas to avoid losing content
       const flatImg = await fabric.FabricImage.fromURL(dataUrl);
       flatImg.set({
+        id: crypto.randomUUID(),
         left: minX,
         top: minY,
-        selectable: false, // Cannot be selected or dragged
-        evented: false,    // Transparent to clicks: never intercepts pointer events!
+        selectable: false,
+        evented: false,
         hoverCursor: 'default',
         moveCursor: 'default',
         lockMovementX: true,
@@ -317,35 +333,37 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         isCheckpoint: true,
       });
 
+      // Clear existing objects only after flatImg is confirmed loaded
+      canvas.clear();
       canvas.add(flatImg);
-      canvas.sendObjectToBack(flatImg);
       canvas.renderAll();
 
-      // Clear undo & redo stacks so previous actions cannot be undone
+      // Clear undo history since past actions are flattened
       undoStack.current = [];
       redoStack.current = [];
-
       isSyncing.current = false;
 
-      // Broadcast the checkpoint to the server and all connected peers
-      const json = canvas.toJSON(['hyperlink', 'isCheckpoint']);
+      // Broadcast full checkpoint state
       const socket = getSocket();
-      socket.emit('canvas:sync', { roomId, canvasJSON: json });
+      socket.emit('canvas:sync', {
+        roomId,
+        canvasJSON: canvas.toJSON(['id', 'hyperlink', 'isCheckpoint']),
+      });
 
-      alert('✓ Checkpoint saved! Canvas is now flattened and locked.');
+      alert('✓ Canvas checkpoint saved! Everything is flattened into an immovable base.');
     } catch (err) {
-      console.error('Failed to save checkpoint:', err);
+      console.error('Error saving checkpoint:', err);
       isSyncing.current = false;
+      alert(`Could not save checkpoint: ${err.message}`);
     }
   }, [roomId]);
 
-  // ── Viewport Control Helpers (Zoom & Recenter) ───────────────────────────
+  // ── Zoom In / Zoom Out / Reset View Helpers ──────────────────────────────
   const zoomIn = useCallback(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
     const center = { x: canvas.width / 2, y: canvas.height / 2 };
-    let zoom = canvas.getZoom() * 1.25;
-    zoom = Math.min(15, zoom);
+    let zoom = Math.min(10, (canvas.getZoom() || 1) * 1.25);
     canvas.zoomToPoint(center, zoom);
     const vpt = canvas.viewportTransform;
     onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
@@ -355,8 +373,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const canvas = fabricRef.current;
     if (!canvas) return;
     const center = { x: canvas.width / 2, y: canvas.height / 2 };
-    let zoom = canvas.getZoom() * 0.8;
-    zoom = Math.max(0.05, zoom);
+    let zoom = Math.max(0.1, (canvas.getZoom() || 1) * 0.8);
     canvas.zoomToPoint(center, zoom);
     const vpt = canvas.viewportTransform;
     onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
@@ -383,7 +400,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     zoomOut,
     resetView,
     exportPNG: () => fabricRef.current?.toDataURL({ format: 'png', multiplier: 1 }),
-    exportJSON: () => fabricRef.current?.toJSON(),
+    exportJSON: () => fabricRef.current?.toJSON(['id', 'hyperlink', 'isCheckpoint']),
 
     addShape(type) {
       const canvas = fabricRef.current;
@@ -396,7 +413,14 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       const spawnX = (-vpt[4] + canvas.width / 2) / zoom - 75;
       const spawnY = (-vpt[5] + canvas.height / 2) / zoom - 50;
 
-      const opts = { left: spawnX, top: spawnY, fill: 'transparent', stroke: color, strokeWidth: 2 };
+      const opts = {
+        id: crypto.randomUUID(),
+        left: spawnX,
+        top: spawnY,
+        fill: 'transparent',
+        stroke: color,
+        strokeWidth: 2,
+      };
       const shape =
         type === 'rect'
           ? new fabric.Rect({ ...opts, width: 150, height: 100 })
@@ -421,13 +445,15 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       const spawnX = (-vpt[4] + canvas.width / 2) / zoom - 80;
       const spawnY = (-vpt[5] + canvas.height / 2) / zoom - 20;
 
-      const text = new fabric.IText('Double-click to edit', {
+      const text = new fabric.IText('Type here...', {
+        id: crypto.randomUUID(),
         left: spawnX,
         top: spawnY,
         fill: activeColorRef.current,
         fontSize: 22,
-        fontFamily: 'Inter, sans-serif',
+        fontFamily: 'sans-serif',
       });
+
       canvas.add(text);
       canvas.setActiveObject(text);
       enforceCheckpointLock(canvas);
@@ -437,44 +463,20 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       emitObjectAdded(text);
     },
 
-    addHyperlinkToSelected() {
+    setHyperlink(url) {
       const canvas = fabricRef.current;
       if (!canvas || !isEditorRef.current) return;
       const activeObj = canvas.getActiveObject();
-      if (!activeObj || activeObj.isCheckpoint) {
-        alert('Please select an editable object or text on the canvas first.');
-        return;
-      }
-      const existing = activeObj.hyperlink || 'https://';
-      const url = prompt('Enter website URL for this object:', existing);
-      if (url === null) return;
-
+      if (!activeObj || activeObj.isCheckpoint) return;
       recordSnapshot();
-
-      if (url.trim()) {
-        activeObj.set({
-          hyperlink: url.trim(),
-          underline: true,
-          hoverCursor: 'pointer',
-        });
-        if (activeObj.type === 'i-text') {
-          activeObj.set({ fill: '#60a5fa' });
-        }
-      } else {
-        activeObj.set({ hyperlink: undefined, underline: false });
-      }
+      activeObj.set({ hyperlink: url ? url.trim() : null });
       canvas.renderAll();
-
       pushSnapshotToUndo();
 
       const socket = getSocket();
       socket.emit('canvas:object:modified', {
         roomId,
         object: activeObj.toObject(['id', 'hyperlink', 'isCheckpoint']),
-      });
-      socket.emit('canvas:sync', {
-        roomId,
-        canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
       });
     },
   }), [addImageFromDataURL, undo, redo, deleteSelected, saveCheckpoint, zoomIn, zoomOut, resetView, emitObjectAdded, recordSnapshot, pushSnapshotToUndo, roomId, enforceCheckpointLock]);
@@ -487,10 +489,10 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     const canvas = new fabric.Canvas('whiteboard-canvas', {
       width: el.clientWidth,
       height: el.clientHeight,
-      backgroundColor: 'transparent', // Transparent so infinite dot grid shines through
+      backgroundColor: 'transparent',
       selection: isEditorRef.current,
       isDrawingMode: false,
-      preserveObjectStacking: true, // Crucial: preserves object layering when clicked!
+      preserveObjectStacking: true,
     });
     fabricRef.current = canvas;
 
@@ -501,24 +503,26 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     });
     observer.observe(el);
 
-    // Mouse Down (Support Pan with Hand tool, Space, Alt, or Middle Mouse)
+    // Mouse / Touch Down (Support Pan with Hand tool, Space, Alt, or Middle Mouse)
     canvas.on('mouse:down', (opt) => {
       const isPanTrigger =
         activeToolRef.current === 'hand' ||
-        opt.e.altKey ||
-        opt.e.button === 1 || // Middle mouse click
+        opt.e?.altKey ||
+        opt.e?.button === 1 ||
         spacePressed.current;
+
+      const pos = getPointerPos(opt.e);
 
       if (isPanTrigger) {
         canvas._isDragging = true;
-        canvas._lastPosX = opt.e.clientX;
-        canvas._lastPosY = opt.e.clientY;
+        canvas._lastPosX = pos.x;
+        canvas._lastPosY = pos.y;
         canvas.defaultCursor = 'grabbing';
         canvas.renderAll();
         return;
       }
 
-      // Deselect if someone clicks on a checkpoint
+      // Deselect if someone clicks on an immovable checkpoint
       if (opt.target && opt.target.isCheckpoint) {
         canvas.discardActiveObject();
       }
@@ -526,16 +530,27 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       recordSnapshot();
     });
 
-    // Mouse Move (Infinite Pan)
+    // Mouse / Touch Move (Smooth Pan with zero NaN risk)
     canvas.on('mouse:move', (opt) => {
       if (!canvas._isDragging) return;
-      const vpt = canvas.viewportTransform.slice();
-      vpt[4] += opt.e.clientX - canvas._lastPosX;
-      vpt[5] += opt.e.clientY - canvas._lastPosY;
-      canvas.setViewportTransform(vpt);
-      canvas._lastPosX = opt.e.clientX;
-      canvas._lastPosY = opt.e.clientY;
-      onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: canvas.getZoom() });
+      const pos = getPointerPos(opt.e);
+      const dx = pos.x - (canvas._lastPosX ?? pos.x);
+      const dy = pos.y - (canvas._lastPosY ?? pos.y);
+
+      if (!isNaN(dx) && !isNaN(dy) && isFinite(dx) && isFinite(dy)) {
+        const vpt = (canvas.viewportTransform || [1, 0, 0, 1, 0, 0]).slice();
+        vpt[4] += dx;
+        vpt[5] += dy;
+
+        // Guard against any NaN coordinates
+        if (!isNaN(vpt[4]) && !isNaN(vpt[5]) && isFinite(vpt[4]) && isFinite(vpt[5])) {
+          canvas.setViewportTransform(vpt);
+          onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: canvas.getZoom() || 1 });
+        }
+      }
+
+      canvas._lastPosX = pos.x;
+      canvas._lastPosY = pos.y;
     });
 
     canvas.on('mouse:up', () => {
@@ -544,69 +559,82 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas.renderAll();
     });
 
-    // Scroll-to-zoom (Infinite zoom range: 0.05 to 15)
+    // Scroll-to-zoom (Zoom range: 0.1 to 10)
     canvas.on('mouse:wheel', (opt) => {
-      const delta = opt.e.deltaY;
-      let zoom = canvas.getZoom();
+      const delta = opt.e?.deltaY || 0;
+      let zoom = canvas.getZoom() || 1;
       zoom *= 0.999 ** delta;
-      zoom = Math.max(0.05, Math.min(15, zoom));
-      canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
-      opt.e.preventDefault();
-      opt.e.stopPropagation();
-      const vpt = canvas.viewportTransform;
-      onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
+      zoom = Math.max(0.1, Math.min(10, zoom));
+      if (!isNaN(zoom)) {
+        canvas.zoomToPoint({ x: opt.e.offsetX, y: opt.e.offsetY }, zoom);
+        opt.e.preventDefault();
+        opt.e.stopPropagation();
+        const vpt = canvas.viewportTransform;
+        onViewportChange?.({ x: vpt[4], y: vpt[5], zoom });
+      }
     });
 
-    // ── Mobile 2-Finger Touch Pinch Zoom & Pan ─────────────────────────────
-    let touchStartDist = 0;
-    let touchStartZoom = 1;
-    let touchStartCenter = null;
-    let touchStartPan = null;
+    // ── Mobile 2-Finger Touch Pinch Zoom & Smooth Delta Pan ─────────────────
+    let lastTouchCenter = null;
+    let lastTouchDist = 0;
     let wasDrawingBeforeTouch = false;
 
     const handleTouchStart = (e) => {
-      if (e.touches.length === 2) {
+      if (e.touches && e.touches.length === 2) {
         wasDrawingBeforeTouch = canvas.isDrawingMode;
         canvas.isDrawingMode = false;
         const t1 = e.touches[0];
         const t2 = e.touches[1];
-        touchStartDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-        touchStartZoom = canvas.getZoom();
-        touchStartCenter = {
+        lastTouchDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+        lastTouchCenter = {
           x: (t1.clientX + t2.clientX) / 2,
           y: (t1.clientY + t2.clientY) / 2,
         };
-        const vpt = canvas.viewportTransform;
-        touchStartPan = { x: vpt[4], y: vpt[5] };
       }
     };
 
     const handleTouchMove = (e) => {
-      if (e.touches.length === 2 && touchStartCenter && touchStartDist > 0) {
+      if (e.touches && e.touches.length === 2 && lastTouchCenter && lastTouchDist > 0) {
         e.preventDefault();
         const t1 = e.touches[0];
         const t2 = e.touches[1];
-        const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
-        const factor = dist / touchStartDist;
-        const newZoom = Math.max(0.05, Math.min(15, touchStartZoom * factor));
-        canvas.zoomToPoint(touchStartCenter, newZoom);
-
+        const currentDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
         const currentCenter = {
           x: (t1.clientX + t2.clientX) / 2,
           y: (t1.clientY + t2.clientY) / 2,
         };
-        const vpt = canvas.viewportTransform.slice();
-        vpt[4] = touchStartPan.x + (currentCenter.x - touchStartCenter.x);
-        vpt[5] = touchStartPan.y + (currentCenter.y - touchStartCenter.y);
-        canvas.setViewportTransform(vpt);
-        onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: newZoom });
+
+        // 1. Delta Zoom around current pinch center
+        if (currentDist > 10 && lastTouchDist > 10) {
+          const zoomFactor = currentDist / lastTouchDist;
+          let newZoom = (canvas.getZoom() || 1) * zoomFactor;
+          newZoom = Math.max(0.1, Math.min(10, newZoom));
+          if (!isNaN(newZoom)) {
+            canvas.zoomToPoint(currentCenter, newZoom);
+          }
+        }
+
+        // 2. Delta Pan
+        const dx = currentCenter.x - lastTouchCenter.x;
+        const dy = currentCenter.y - lastTouchCenter.y;
+        if (!isNaN(dx) && !isNaN(dy) && (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5)) {
+          canvas.relativePan({ x: dx, y: dy });
+        }
+
+        lastTouchDist = currentDist;
+        lastTouchCenter = currentCenter;
+
+        const vpt = canvas.viewportTransform;
+        if (vpt && !isNaN(vpt[4]) && !isNaN(vpt[5])) {
+          onViewportChange?.({ x: vpt[4], y: vpt[5], zoom: canvas.getZoom() || 1 });
+        }
       }
     };
 
     const handleTouchEnd = (e) => {
-      if (e.touches.length < 2) {
-        touchStartCenter = null;
-        touchStartDist = 0;
+      if (!e.touches || e.touches.length < 2) {
+        lastTouchCenter = null;
+        lastTouchDist = 0;
         if (wasDrawingBeforeTouch && isEditorRef.current) {
           canvas.isDrawingMode = true;
         }
@@ -621,30 +649,30 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       upperEl.addEventListener('touchcancel', handleTouchEnd, { passive: true });
     }
 
-    // Drag-and-drop image upload
+    // Drag-and-drop Image Upload
     const handleDragOver = (e) => { e.preventDefault(); };
-    const handleDrop = (e) => {
+    const handleDrop = async (e) => {
       e.preventDefault();
       if (!isEditorRef.current) return;
       const file = e.dataTransfer?.files?.[0];
       if (file && file.type.startsWith('image/')) {
-        const reader = new FileReader();
-        reader.onload = (ev) => addImageFromDataURL(ev.target.result);
-        reader.readAsDataURL(file);
+        const compressed = await compressImage(file, 1200, 0.82);
+        addImageFromDataURL(compressed);
       }
     };
 
     // Clipboard Paste (Ctrl+V)
-    const handlePaste = (e) => {
+    const handlePaste = async (e) => {
       if (!isEditorRef.current) return;
       const items = e.clipboardData?.items;
       if (!items) return;
       for (let i = 0; i < items.length; i++) {
         if (items[i].type.indexOf('image') !== -1) {
           const blob = items[i].getAsFile();
-          const reader = new FileReader();
-          reader.onload = (ev) => addImageFromDataURL(ev.target.result);
-          reader.readAsDataURL(blob);
+          if (blob) {
+            const compressed = await compressImage(blob, 1200, 0.82);
+            addImageFromDataURL(compressed);
+          }
           break;
         }
       }
@@ -667,7 +695,6 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        // Non-destructive: Hide rather than delete permanently
         toggleHideSelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
@@ -712,7 +739,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       canvas.dispose();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Run ONCE on mount
+  }, []);
 
   // ── 2. Handle Role Transition (Observer -> Editor) ─────────────────────────
   useEffect(() => {
@@ -737,10 +764,12 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     canvas.renderAll();
   }, [isEditor, activeTool]);
 
-  // ── 3. Load initial canvas state from server ──────────────────────────────
+  // ── 3. Load initial canvas state on mount (runs ONCE) ─────────────────────
   useEffect(() => {
-    if (!fabricRef.current || !initialCanvas) return;
+    if (!fabricRef.current || !initialCanvas || hasLoadedInitial.current) return;
     if (Array.isArray(initialCanvas) && initialCanvas.length === 0) return;
+
+    hasLoadedInitial.current = true;
     isSyncing.current = true;
     fabricRef.current.loadFromJSON(
       Array.isArray(initialCanvas)
@@ -753,6 +782,9 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
         enforceCheckpointLock(canvas);
         canvas.renderAll();
       }
+      isSyncing.current = false;
+    }).catch((err) => {
+      console.error('Error loading initial canvas:', err);
       isSyncing.current = false;
     });
   }, [initialCanvas, enforceCheckpointLock]);
@@ -791,7 +823,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
       case 'eraser':
         canvas.isDrawingMode = true;
         canvas.freeDrawingBrush = new fabric.PencilBrush(canvas);
-        canvas.freeDrawingBrush.color = '#1e1e2e'; // Dark-out stroke
+        canvas.freeDrawingBrush.color = '#1e1e2e'; // Dark canvas-matching stroke
         canvas.freeDrawingBrush.width = brushSize * 4;
         break;
       case 'select':
@@ -802,39 +834,29 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     canvas.renderAll();
   }, [activeTool, activeColor, brushSize, isEditor]);
 
-  // ── 5. Socket real-time event listeners ───────────────────────────────────
+  // ── 5. Socket real-time event listeners (Incremental & Resilient) ─────────
   useEffect(() => {
     const canvas = fabricRef.current;
     if (!canvas) return;
 
+    // Local object added: attach ID and broadcast incrementally
     function onObjectAdded({ target }) {
       if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
+      if (!target.id) target.id = crypto.randomUUID();
       enforceCheckpointLock(canvas);
       pushSnapshotToUndo();
       emitObjectAdded(target);
     }
+
     function onObjectModified({ target }) {
       if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
       enforceCheckpointLock(canvas);
       pushSnapshotToUndo();
+      if (!target.id) target.id = crypto.randomUUID();
       const socket = getSocket();
       socket.emit('canvas:object:modified', {
         roomId,
         object: target.toObject(['id', 'hyperlink', 'isCheckpoint']),
-      });
-      socket.emit('canvas:sync', {
-        roomId,
-        canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
-      });
-    }
-    function onObjectRemoved({ target }) {
-      if (!isEditorRef.current || isSyncing.current || isHistoryAction.current || !target) return;
-      pushSnapshotToUndo();
-      const socket = getSocket();
-      socket.emit('canvas:object:removed', { roomId });
-      socket.emit('canvas:sync', {
-        roomId,
-        canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint']),
       });
     }
 
@@ -849,27 +871,90 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     canvas.on('object:added', onObjectAdded);
     canvas.on('object:modified', onObjectModified);
-    canvas.on('object:removed', onObjectRemoved);
     canvas.on('mouse:down', onMouseDown);
 
-    // Full canvas sync from peers or checkpoint broadcast
+    // ── Incremental Object Add from Peer (Never wipes canvas!) ─────────────
     const socket = getSocket();
-    const handleSync = ({ canvasJSON }) => {
+
+    const handleRemoteObjectAdded = async ({ object: objData }) => {
+      if (!canvas || !objData) return;
+      // Prevent duplicate insertion
+      if (objData.id && canvas.getObjects().some((o) => o.id === objData.id)) {
+        return;
+      }
+
       isSyncing.current = true;
-      canvas.loadFromJSON(canvasJSON).then(() => {
+      try {
+        const enlivened = await fabric.util.enlivenObjects([objData]);
+        if (enlivened && enlivened[0]) {
+          const obj = enlivened[0];
+          obj.selectable = isEditorRef.current && activeToolRef.current !== 'hand';
+          canvas.add(obj);
+          enforceCheckpointLock(canvas);
+          canvas.renderAll();
+        }
+      } catch (err) {
+        console.error('Error adding remote object:', err);
+      } finally {
+        isSyncing.current = false;
+      }
+    };
+
+    // Incremental Object Modified from Peer
+    const handleRemoteObjectModified = ({ object: objData }) => {
+      if (!canvas || !objData?.id) return;
+      const target = canvas.getObjects().find((o) => o.id === objData.id);
+      if (target) {
+        isSyncing.current = true;
+        target.set(objData);
+        target.setCoords();
+        canvas.renderAll();
+        isSyncing.current = false;
+      }
+    };
+
+    // Incremental Object Removed from Peer
+    const handleRemoteObjectRemoved = ({ objectId }) => {
+      if (!canvas) return;
+      isSyncing.current = true;
+      if (objectId) {
+        const target = canvas.getObjects().find((o) => o.id === objectId);
+        if (target && !target.isCheckpoint) {
+          canvas.remove(target);
+          canvas.renderAll();
+        }
+      }
+      isSyncing.current = false;
+    };
+
+    // Full canvas sync (Only for Checkpoint flattening and Undo/Redo)
+    const handleSync = async ({ canvasJSON }) => {
+      if (!canvas || !canvasJSON) return;
+      isSyncing.current = true;
+      try {
+        await canvas.loadFromJSON(canvasJSON);
         canvas.selection = isEditorRef.current && activeToolRef.current !== 'hand';
         enforceCheckpointLock(canvas);
         canvas.renderAll();
+      } catch (err) {
+        console.error('Canvas sync error:', err);
+      } finally {
         isSyncing.current = false;
-      });
+      }
     };
+
+    socket.on('canvas:object:added', handleRemoteObjectAdded);
+    socket.on('canvas:object:modified', handleRemoteObjectModified);
+    socket.on('canvas:object:removed', handleRemoteObjectRemoved);
     socket.on('canvas:sync', handleSync);
 
     return () => {
       canvas.off('object:added', onObjectAdded);
       canvas.off('object:modified', onObjectModified);
-      canvas.off('object:removed', onObjectRemoved);
       canvas.off('mouse:down', onMouseDown);
+      socket.off('canvas:object:added', handleRemoteObjectAdded);
+      socket.off('canvas:object:modified', handleRemoteObjectModified);
+      socket.off('canvas:object:removed', handleRemoteObjectRemoved);
       socket.off('canvas:sync', handleSync);
     };
   }, [roomId, emitObjectAdded, pushSnapshotToUndo, enforceCheckpointLock]);

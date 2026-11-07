@@ -185,7 +185,7 @@ export function registerSocketHandlers(io) {
       console.log(`[socket] Room ${roomId} autolock toggled to ${room.autoLockEnabled} by admin`);
     });
 
-    // ── CANVAS: FULL STATE SYNC ──────────────────────────────────────────────
+    // ── CANVAS: FULL STATE SYNC (Checkpoints, Undo/Redo) ────────────────────
     socket.on('canvas:sync', ({ roomId, canvasJSON } = {}) => {
       if (!canEdit(socket)) return;
 
@@ -198,21 +198,66 @@ export function registerSocketHandlers(io) {
       socket.to(roomId).emit('canvas:sync', { canvasJSON });
     });
 
-    // ── CANVAS: INCREMENTAL OBJECT ADD / MODIFY ─────────────────────────────
-    ['canvas:object:added', 'canvas:object:modified'].forEach((event) => {
-      socket.on(event, (payload) => {
-        if (!canEdit(socket)) return;
-        const { roomId } = socketRoles.get(socket.id) ?? {};
-        if (!roomId) return;
-        socket.to(roomId).emit(event, payload);
-      });
+    // ── CANVAS: INCREMENTAL OBJECT ADD ───────────────────────────────────────
+    socket.on('canvas:object:added', (payload) => {
+      if (!canEdit(socket)) return;
+      const { roomId } = socketRoles.get(socket.id) ?? {};
+      if (!roomId || !payload?.object) return;
+
+      const room = getRoom(roomId);
+      if (room) {
+        if (!room.canvasState || typeof room.canvasState !== 'object') {
+          room.canvasState = { objects: [] };
+        }
+        if (Array.isArray(room.canvasState)) {
+          room.canvasState = { objects: room.canvasState };
+        }
+        if (!Array.isArray(room.canvasState.objects)) {
+          room.canvasState.objects = [];
+        }
+
+        const existingIdx = room.canvasState.objects.findIndex((o) => o?.id && o.id === payload.object.id);
+        if (existingIdx >= 0) {
+          room.canvasState.objects[existingIdx] = payload.object;
+        } else {
+          room.canvasState.objects.push(payload.object);
+        }
+        setRoom(roomId, room);
+      }
+
+      socket.to(roomId).emit('canvas:object:added', payload);
     });
 
-    // Canvas removal: only admin can remove objects
+    // ── CANVAS: INCREMENTAL OBJECT MODIFIED ──────────────────────────────────
+    socket.on('canvas:object:modified', (payload) => {
+      if (!canEdit(socket)) return;
+      const { roomId } = socketRoles.get(socket.id) ?? {};
+      if (!roomId || !payload?.object?.id) return;
+
+      const room = getRoom(roomId);
+      if (room && room.canvasState?.objects) {
+        const idx = room.canvasState.objects.findIndex((o) => o?.id === payload.object.id);
+        if (idx >= 0) {
+          room.canvasState.objects[idx] = payload.object;
+          setRoom(roomId, room);
+        }
+      }
+
+      socket.to(roomId).emit('canvas:object:modified', payload);
+    });
+
+    // ── CANVAS: INCREMENTAL OBJECT REMOVAL ───────────────────────────────────
     socket.on('canvas:object:removed', (payload) => {
       if (!isAdmin(socket)) return;
       const { roomId } = socketRoles.get(socket.id) ?? {};
       if (!roomId) return;
+
+      const room = getRoom(roomId);
+      if (room && payload?.objectId && room.canvasState?.objects) {
+        room.canvasState.objects = room.canvasState.objects.filter((o) => o?.id !== payload.objectId);
+        setRoom(roomId, room);
+      }
+
       socket.to(roomId).emit('canvas:object:removed', payload);
     });
 
