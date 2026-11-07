@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { MongoClient } from 'mongodb';
+import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,45 +22,89 @@ const DEFAULT_SEED_ROOM = {
 
 /**
  * In-memory room store backed by:
- * 1) Local JSON file (server/data/rooms.json)
- * 2) Optional MongoDB Atlas cloud database if MONGODB_URI is provided
+ * 1) Supabase PostgreSQL database (preferred when SUPABASE_URL & SUPABASE_KEY are provided)
+ * 2) Local JSON file (server/data/rooms.json) as local cache & offline fallback
  */
 const rooms = new Map();
 
-// Cloud MongoDB client if configured
-let mongoCollection = null;
-const MONGODB_URI = process.env.MONGODB_URI || '';
+// ── Supabase Configuration ──────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY =
+  process.env.SUPABASE_SERVICE_ROLE_KEY ||
+  process.env.SUPABASE_KEY ||
+  process.env.SUPABASE_ANON_KEY ||
+  '';
 
-async function initMongo() {
-  if (!MONGODB_URI) {
-    console.log('[store] No MONGODB_URI set, using local disk persistence.');
+let supabase = null;
+if (SUPABASE_URL && SUPABASE_KEY) {
+  try {
+    supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+    console.log('[store] Supabase client initialized.');
+  } catch (err) {
+    console.error('[store] Error initializing Supabase client:', err.message);
+  }
+}
+
+function rowToRoom(row) {
+  return {
+    id: row.id,
+    name: row.name || `Room ${row.id.slice(0, 4)}`,
+    passwordHash: row.password_hash,
+    isLocked: !!row.is_locked,
+    autoLockEnabled: !!row.auto_lock_enabled,
+    canvasState: row.canvas_state || [],
+    mediaElements: row.media_elements || [],
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+function roomToRow(r) {
+  return {
+    id: r.id,
+    name: r.name || `Room ${r.id.slice(0, 4)}`,
+    password_hash: r.passwordHash,
+    is_locked: !!r.isLocked,
+    auto_lock_enabled: !!r.autoLockEnabled,
+    canvas_state: r.canvasState || [],
+    media_elements: r.mediaElements || [],
+    created_at: r.createdAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+}
+
+async function initSupabase() {
+  if (!supabase) {
+    console.log('[store] No SUPABASE_URL set, running with local file persistence.');
     return;
   }
-  try {
-    const client = new MongoClient(MONGODB_URI);
-    await client.connect();
-    const db = client.db(process.env.MONGODB_DB || 'collab_whiteboard');
-    mongoCollection = db.collection('rooms');
-    console.log('[store] Connected to MongoDB Atlas. Syncing rooms from cloud...');
 
-    const cloudRooms = await mongoCollection.find({}).toArray();
-    if (cloudRooms.length > 0) {
-      cloudRooms.forEach((r) => {
-        const { _id, ...roomData } = r;
-        rooms.set(roomData.id, roomData);
+  try {
+    console.log('[store] Connecting to Supabase PostgreSQL...');
+    const { data, error } = await supabase.from('rooms').select('*');
+
+    if (error) {
+      console.error('[store] Supabase query error:', error.message);
+      return;
+    }
+
+    if (Array.isArray(data) && data.length > 0) {
+      data.forEach((row) => {
+        const roomObj = rowToRoom(row);
+        rooms.set(roomObj.id, roomObj);
       });
-      console.log(`[store] Loaded ${cloudRooms.length} rooms from MongoDB Atlas.`);
+      console.log(`[store] Successfully loaded ${data.length} room(s) from Supabase.`);
       saveToDiskSync();
     } else if (rooms.size > 0) {
-      // Seed mongo with existing local rooms
-      const arr = Array.from(rooms.values());
-      for (const r of arr) {
-        await mongoCollection.updateOne({ id: r.id }, { $set: r }, { upsert: true });
+      // If Supabase table is empty but we have local rooms, auto-migrate them to Supabase!
+      console.log(`[store] Supabase is empty. Migrating ${rooms.size} local room(s) to Supabase...`);
+      for (const r of rooms.values()) {
+        const row = roomToRow(r);
+        await supabase.from('rooms').upsert(row, { onConflict: 'id' });
       }
-      console.log(`[store] Seeded ${arr.length} rooms to MongoDB Atlas.`);
+      console.log('[store] Migration to Supabase complete.');
     }
   } catch (err) {
-    console.error('[store] MongoDB connection error (falling back to disk):', err.message);
+    console.error('[store] Failed to sync with Supabase:', err.message);
   }
 }
 
@@ -83,14 +127,14 @@ function loadFromDisk() {
       const data = JSON.parse(raw);
       if (Array.isArray(data) && data.length > 0) {
         data.forEach((r) => rooms.set(r.id, r));
-        console.log(`[store] Loaded ${rooms.size} room(s) from ${DATA_FILE}`);
+        console.log(`[store] Loaded ${rooms.size} room(s) from local cache.`);
       }
     }
   } catch (err) {
     console.error('[store] Error loading rooms from disk:', err.message);
   }
 
-  // Ensure at least one default room exists
+  // Ensure default seed room exists if completely empty
   if (rooms.size === 0) {
     rooms.set(DEFAULT_SEED_ROOM.id, { ...DEFAULT_SEED_ROOM });
     saveToDiskSync();
@@ -111,23 +155,36 @@ function saveToDiskSync() {
 }
 
 let saveTimeout = null;
-function triggerSave() {
+function triggerSave(targetRoomId = null) {
   clearTimeout(saveTimeout);
   saveTimeout = setTimeout(() => {
     saveToDiskSync();
-    // Also save to MongoDB if connected
-    if (mongoCollection) {
-      const arr = Array.from(rooms.values());
-      for (const r of arr) {
-        mongoCollection.updateOne({ id: r.id }, { $set: r }, { upsert: true }).catch((err) => {
-          console.error(`[store] Mongo update error for room ${r.id}:`, err.message);
-        });
+
+    // Sync to Supabase in background
+    if (supabase) {
+      if (targetRoomId && rooms.has(targetRoomId)) {
+        const row = roomToRow(rooms.get(targetRoomId));
+        supabase
+          .from('rooms')
+          .upsert(row, { onConflict: 'id' })
+          .then(({ error }) => {
+            if (error) console.error(`[store] Supabase upsert error for room ${targetRoomId}:`, error.message);
+          });
+      } else {
+        // Upsert all rooms
+        const rows = Array.from(rooms.values()).map(roomToRow);
+        supabase
+          .from('rooms')
+          .upsert(rows, { onConflict: 'id' })
+          .then(({ error }) => {
+            if (error) console.error('[store] Supabase bulk upsert error:', error.message);
+          });
       }
     }
   }, 1000);
 }
 
-// Ensure pending saves flush before process exit
+// Ensure pending saves flush before process exits
 process.on('SIGTERM', () => {
   console.log('[store] SIGTERM received. Flushing rooms to disk...');
   saveToDiskSync();
@@ -137,9 +194,9 @@ process.on('SIGINT', () => {
   saveToDiskSync();
 });
 
-// Boot: load from disk first, then attempt MongoDB init
+// Boot: load from local cache first, then sync with Supabase
 loadFromDisk();
-initMongo().catch(() => {});
+initSupabase().catch(() => {});
 
 // ── Exported Room Store Methods ─────────────────────────────────────────────
 export function getRoom(id) {
@@ -148,14 +205,20 @@ export function getRoom(id) {
 
 export function setRoom(id, data) {
   rooms.set(id, data);
-  triggerSave();
+  triggerSave(id);
 }
 
 export function deleteRoom(id) {
   rooms.delete(id);
   triggerSave();
-  if (mongoCollection) {
-    mongoCollection.deleteOne({ id }).catch(() => {});
+  if (supabase) {
+    supabase
+      .from('rooms')
+      .delete()
+      .eq('id', id)
+      .then(({ error }) => {
+        if (error) console.error(`[store] Supabase delete error for room ${id}:`, error.message);
+      });
   }
 }
 
@@ -207,11 +270,16 @@ export function importRooms(importedList) {
     }
   }
   saveToDiskSync();
-  if (mongoCollection) {
-    const arr = Array.from(rooms.values());
-    for (const r of arr) {
-      mongoCollection.updateOne({ id: r.id }, { $set: r }, { upsert: true }).catch(() => {});
-    }
+
+  if (supabase) {
+    const rows = Array.from(rooms.values()).map(roomToRow);
+    supabase
+      .from('rooms')
+      .upsert(rows, { onConflict: 'id' })
+      .then(({ error }) => {
+        if (error) console.error('[store] Supabase import upsert error:', error.message);
+      });
   }
+
   return count;
 }
