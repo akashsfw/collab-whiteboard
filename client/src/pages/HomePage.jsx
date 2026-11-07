@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   fetchRooms,
@@ -7,10 +7,14 @@ import {
   verifyAdminKey,
   setRoomLock,
   setRoomAutoLock,
+  exportRoomsBackup,
+  importRoomsBackup,
+  deleteRoomAdmin,
 } from '../lib/api.js';
 
 export default function HomePage() {
   const navigate = useNavigate();
+  const fileInputRef = useRef(null);
 
   // Rooms list & loading
   const [rooms, setRooms] = useState([]);
@@ -32,6 +36,7 @@ export default function HomePage() {
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [adminInputKey, setAdminInputKey] = useState('');
   const [adminError, setAdminError] = useState('');
+  const [backupLoading, setBackupLoading] = useState(false);
 
   // Normal user room password entry modal
   const [selectedRoomForJoin, setSelectedRoomForJoin] = useState(null);
@@ -95,11 +100,13 @@ export default function HomePage() {
     setAdminError('');
     try {
       await verifyAdminKey(adminInputKey.trim());
-      sessionStorage.setItem('adminKey', adminInputKey.trim());
-      setAdminKey(adminInputKey.trim());
+      const key = adminInputKey.trim();
+      sessionStorage.setItem('adminKey', key);
+      setAdminKey(key);
       setIsAdmin(true);
       setShowAdminModal(false);
       setAdminInputKey('');
+      await loadRooms();
     } catch (err) {
       setAdminError(err.message || 'Invalid admin passcode.');
     }
@@ -109,6 +116,63 @@ export default function HomePage() {
     sessionStorage.removeItem('adminKey');
     setAdminKey('');
     setIsAdmin(false);
+  }
+
+  // ── Admin Backup & Restore ───────────────────────────────────────────────
+  async function handleExportBackup() {
+    if (!adminKey) return;
+    setBackupLoading(true);
+    try {
+      const data = await exportRoomsBackup(adminKey);
+      const jsonStr = JSON.stringify(data, null, 2);
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `collab-board-rooms-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      alert(`Export failed: ${err.message}`);
+    } finally {
+      setBackupLoading(false);
+    }
+  }
+
+  async function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file || !adminKey) return;
+    setBackupLoading(true);
+    try {
+      const text = await file.text();
+      const parsed = JSON.parse(text);
+      const roomsList = Array.isArray(parsed) ? parsed : parsed.rooms;
+      if (!Array.isArray(roomsList)) {
+        throw new Error('Invalid backup file. Must contain a rooms array.');
+      }
+      const res = await importRoomsBackup(adminKey, roomsList);
+      alert(`Successfully restored ${res.count} room(s) from backup!`);
+      await loadRooms();
+    } catch (err) {
+      alert(`Import failed: ${err.message}`);
+    } finally {
+      setBackupLoading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  }
+
+  // ── Admin Delete Room ────────────────────────────────────────────────────
+  async function handleDeleteRoom(roomId, roomName) {
+    if (!adminKey) return;
+    const confirmMsg = `Are you sure you want to permanently delete "${roomName || roomId}"?\nAll canvas objects and media in this room will be removed.`;
+    if (!window.confirm(confirmMsg)) return;
+
+    try {
+      await deleteRoomAdmin(roomId, adminKey);
+      setRooms((prev) => prev.filter((r) => r.id !== roomId));
+    } catch (err) {
+      alert(err.message);
+    }
   }
 
   // ── Admin Lock & Auto-Lock Toggles ────────────────────────────────────────
@@ -171,19 +235,47 @@ export default function HomePage() {
             Collab<span className="text-accent">Board</span>
           </span>
           <span className="text-xs bg-white/5 border border-white/10 text-muted px-2.5 py-1 rounded-full font-mono">
-            {rooms.length} {rooms.length === 1 ? 'room' : 'rooms'} created
+            {rooms.length} {rooms.length === 1 ? 'room' : 'rooms'} active
           </span>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2 sm:gap-3">
           {isAdmin ? (
-            <div className="flex items-center gap-2">
+            <div className="flex items-center flex-wrap gap-2">
               <span className="text-xs bg-purple-950/80 text-purple-300 border border-purple-600 px-3 py-1 rounded-full font-bold flex items-center gap-1.5 shadow-sm">
                 <span>👑</span> Admin Mode Active
               </span>
+
+              {/* Export Backup Button */}
+              <button
+                onClick={handleExportBackup}
+                disabled={backupLoading}
+                title="Download full JSON backup of all rooms and drawings"
+                className="text-xs bg-surface border border-purple-500/30 text-purple-200 hover:bg-purple-900/40 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1"
+              >
+                <span>📥</span> Export Backup
+              </button>
+
+              {/* Import Backup Button */}
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={backupLoading}
+                title="Restore rooms from a previously exported JSON backup"
+                className="text-xs bg-surface border border-purple-500/30 text-purple-200 hover:bg-purple-900/40 px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1"
+              >
+                <span>📤</span> Import Backup
+              </button>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".json"
+                onChange={handleImportFile}
+                className="hidden"
+              />
+
               <button
                 onClick={handleAdminLogout}
-                className="text-xs text-muted hover:text-white border border-white/10 hover:border-white/30 px-3 py-1 rounded-lg transition-colors"
+                className="text-xs text-muted hover:text-white border border-white/10 hover:border-white/30 px-2.5 py-1 rounded-lg transition-colors"
               >
                 Logout
               </button>
@@ -224,6 +316,9 @@ export default function HomePage() {
               </span>
               <span className="text-xs bg-surface border border-white/10 px-3 py-1 rounded-full text-muted">
                 🔒 Admin Lockout & Auto-Lock
+              </span>
+              <span className="text-xs bg-surface border border-white/10 px-3 py-1 rounded-full text-muted">
+                📦 Persistent Backup
               </span>
             </div>
           </div>
@@ -301,7 +396,7 @@ export default function HomePage() {
                 <span>📁</span> All Created Rooms
               </h2>
               <p className="text-xs text-muted">
-                Chronologically sorted by creation time (most recent first).
+                Chronologically sorted by creation time (most recent first). All rooms stay permanently intact.
               </p>
             </div>
 
@@ -329,12 +424,20 @@ export default function HomePage() {
               Loading rooms directory…
             </div>
           ) : filteredRooms.length === 0 ? (
-            <div className="text-center py-16 bg-surface/40 border border-white/5 rounded-2xl flex flex-col items-center gap-2">
+            <div className="text-center py-16 bg-surface/40 border border-white/5 rounded-2xl flex flex-col items-center gap-3">
               <span className="text-3xl">🎨</span>
               <p className="text-white font-medium text-sm">No rooms found</p>
-              <p className="text-muted text-xs">
-                {searchQuery ? 'Try a different search term.' : 'Create the first room above to get started!'}
+              <p className="text-muted text-xs max-w-sm">
+                {searchQuery
+                  ? 'No room matched your search term.'
+                  : 'Create a room using the form above to get started, or restore from an existing backup.'}
               </p>
+              <button
+                onClick={loadRooms}
+                className="text-xs bg-surface border border-white/10 hover:border-white/30 text-white px-4 py-1.5 rounded-lg transition-colors mt-1"
+              >
+                ↻ Refresh Directory
+              </button>
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -385,9 +488,20 @@ export default function HomePage() {
                     </div>
 
                     {/* Meta stats */}
-                    <div className="flex items-center gap-3 text-xs text-muted border-t border-white/5 pt-3">
-                      <span>🎨 {room.objectCount || 0} items</span>
-                      {room.mediaCount > 0 && <span>▶ {room.mediaCount} video(s)</span>}
+                    <div className="flex items-center justify-between text-xs text-muted border-t border-white/5 pt-3">
+                      <div className="flex items-center gap-3">
+                        <span>🎨 {room.objectCount || 0} items</span>
+                        {room.mediaCount > 0 && <span>▶ {room.mediaCount} video(s)</span>}
+                      </div>
+                      {isAdmin && (
+                        <button
+                          onClick={() => handleDeleteRoom(room.id, room.name)}
+                          title="Admin: Permanently delete this room"
+                          className="text-[11px] text-red-400 hover:text-red-300 hover:underline transition-colors"
+                        >
+                          🗑️ Delete Room
+                        </button>
+                      )}
                     </div>
 
                     {/* Actions */}
@@ -406,7 +520,7 @@ export default function HomePage() {
                               onClick={() => handleToggleLock(room.id, room.isLocked)}
                               className={`text-xs py-1.5 px-2 rounded-lg font-medium border transition-colors ${
                                 room.isLocked
-                                  ? 'bg-red-950/50 border-red-700 text-red-300 hover:bg-red-900/60'
+                                   ? 'bg-red-950/50 border-red-700 text-red-300 hover:bg-red-900/60'
                                   : 'border-white/10 text-muted hover:text-white hover:bg-white/5'
                               }`}
                             >

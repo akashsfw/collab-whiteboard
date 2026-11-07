@@ -36,7 +36,8 @@ export default function RoomPage() {
 
   // ── 1. Verify room exists ──────────────────────────────────────────────────
   useEffect(() => {
-    fetchRoom(roomId).then((data) => {
+    const storedAdminKey = sessionStorage.getItem('adminKey') || '';
+    fetchRoom(roomId, storedAdminKey).then((data) => {
       if (!data) {
         setRoomMeta(false);
       } else {

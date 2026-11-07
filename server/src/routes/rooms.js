@@ -4,9 +4,12 @@ import { customAlphabet } from 'nanoid';
 import {
   getRoom,
   setRoom,
+  deleteRoom,
   roomExists,
   getRoomSummary,
   getAllRoomsSummary,
+  exportAllRooms,
+  importRooms,
 } from '../store/rooms.js';
 
 const nanoid = customAlphabet('abcdefghijklmnopqrstuvwxyz0123456789', 12);
@@ -63,9 +66,30 @@ roomRouter.post('/', async (req, res) => {
 /**
  * GET /api/rooms/:roomId
  * Returns room metadata (no password). 404 if not found.
+ * If admin key is provided and room doesn't exist, auto-provisions it.
  */
-roomRouter.get('/:roomId', (req, res) => {
-  const summary = getRoomSummary(req.params.roomId);
+roomRouter.get('/:roomId', async (req, res) => {
+  const { roomId } = req.params;
+  const adminKey = req.query.adminKey || req.headers['x-admin-key'];
+
+  let summary = getRoomSummary(roomId);
+  if (!summary && adminKey && adminKey.trim() === ADMIN_SECRET) {
+    // Auto-create room for Admin
+    const defaultHash = await bcrypt.hash('1234', 10);
+    const newRoom = {
+      id: roomId,
+      name: `Room ${roomId.slice(0, 4)}`,
+      passwordHash: defaultHash,
+      isLocked: false,
+      autoLockEnabled: false,
+      canvasState: [],
+      mediaElements: [],
+      createdAt: new Date().toISOString(),
+    };
+    setRoom(roomId, newRoom);
+    summary = getRoomSummary(roomId);
+  }
+
   if (!summary) return res.status(404).json({ error: 'Room not found.' });
   return res.json(summary);
 });
@@ -103,6 +127,59 @@ roomRouter.post('/admin/verify', (req, res) => {
     return res.status(403).json({ error: 'Invalid admin passcode.' });
   }
   return res.json({ ok: true });
+});
+
+/**
+ * POST /api/rooms/admin/export
+ * Body: { adminKey: string }
+ * Exports full room data backup for admin
+ */
+roomRouter.post('/admin/export', (req, res) => {
+  const { adminKey } = req.body;
+  if (!adminKey || adminKey.trim() !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Admin authorization required.' });
+  }
+  const allData = exportAllRooms();
+  return res.json({ success: true, count: allData.length, rooms: allData });
+});
+
+/**
+ * POST /api/rooms/admin/import
+ * Body: { adminKey: string, rooms: object[] }
+ * Restores rooms from JSON backup
+ */
+roomRouter.post('/admin/import', (req, res) => {
+  const { adminKey, rooms } = req.body;
+  if (!adminKey || adminKey.trim() !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Admin authorization required.' });
+  }
+  if (!Array.isArray(rooms)) {
+    return res.status(400).json({ error: 'Import data must be an array of rooms.' });
+  }
+  try {
+    const importedCount = importRooms(rooms);
+    return res.json({ success: true, count: importedCount });
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+});
+
+/**
+ * DELETE /api/rooms/:roomId
+ * Body: { adminKey: string }
+ * Admin can delete a room permanently
+ */
+roomRouter.delete('/:roomId', (req, res) => {
+  const { adminKey } = req.body;
+  if (!adminKey || adminKey.trim() !== ADMIN_SECRET) {
+    return res.status(403).json({ error: 'Admin authorization required.' });
+  }
+  const { roomId } = req.params;
+  if (!roomExists(roomId)) {
+    return res.status(404).json({ error: 'Room not found.' });
+  }
+  deleteRoom(roomId);
+  return res.json({ ok: true, deleted: roomId });
 });
 
 /**

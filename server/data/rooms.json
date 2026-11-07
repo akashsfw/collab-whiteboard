@@ -1,0 +1,12 @@
+[
+  {
+    "id": "main-board",
+    "name": "Main Collaboration Room",
+    "passwordHash": "$2a$10$XtLSk.Hgjidx14mKSiYjX.tUbJ3wMD431bKMSqKM9I0dkATXww/yy",
+    "isLocked": false,
+    "autoLockEnabled": false,
+    "canvasState": [],
+    "mediaElements": [],
+    "createdAt": "2026-11-07T00:00:00.000Z"
+  }
+]

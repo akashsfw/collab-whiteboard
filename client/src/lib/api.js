@@ -22,9 +22,12 @@ export async function createRoom({ name, password, autoLockEnabled }) {
   return res.json();
 }
 
-/** GET /api/rooms/:id — check room exists */
-export async function fetchRoom(roomId) {
-  const res = await fetch(`${BASE}/api/rooms/${roomId}`, { credentials: 'include' });
+/** GET /api/rooms/:id — check room exists, passes optional adminKey */
+export async function fetchRoom(roomId, adminKey = '') {
+  const url = adminKey
+    ? `${BASE}/api/rooms/${roomId}?adminKey=${encodeURIComponent(adminKey)}`
+    : `${BASE}/api/rooms/${roomId}`;
+  const res = await fetch(url, { credentials: 'include' });
   if (!res.ok) return null;
   return res.json();
 }
@@ -85,6 +88,51 @@ export async function setRoomAutoLock(roomId, adminKey, autoLockEnabled) {
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error || 'Failed to update auto-lock status');
+  }
+  return res.json();
+}
+
+/** POST /api/rooms/admin/export — download all rooms full JSON backup */
+export async function exportRoomsBackup(adminKey) {
+  const res = await fetch(`${BASE}/api/rooms/admin/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ adminKey }),
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to export rooms backup');
+  }
+  return res.json();
+}
+
+/** POST /api/rooms/admin/import — restore rooms from JSON backup */
+export async function importRoomsBackup(adminKey, rooms) {
+  const res = await fetch(`${BASE}/api/rooms/admin/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ adminKey, rooms }),
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to import backup');
+  }
+  return res.json();
+}
+
+/** DELETE /api/rooms/:id — admin delete room permanently */
+export async function deleteRoomAdmin(roomId, adminKey) {
+  const res = await fetch(`${BASE}/api/rooms/${roomId}`, {
+    method: 'DELETE',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ adminKey }),
+    credentials: 'include',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to delete room');
   }
   return res.json();
 }

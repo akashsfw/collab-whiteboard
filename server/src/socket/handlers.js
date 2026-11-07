@@ -36,20 +36,38 @@ function canEdit(socket) {
 export function registerSocketHandlers(io) {
   io.on('connection', (socket) => {
     // ── JOIN ROOM ────────────────────────────────────────────────────────────
-    socket.on('room:join', ({ roomId, adminKey } = {}) => {
-      if (!roomId || !roomExists(roomId)) {
-        socket.emit('error', { message: 'Room not found.' });
+    socket.on('room:join', async ({ roomId, adminKey } = {}) => {
+      if (!roomId) {
+        socket.emit('error', { message: 'Room ID is required.' });
         return;
+      }
+
+      const isValidAdmin = !!(adminKey && adminKey.trim() === ADMIN_SECRET);
+
+      // Auto-provision room if admin joins a missing room ID
+      if (!roomExists(roomId)) {
+        if (isValidAdmin) {
+          const defaultHash = await bcrypt.hash('1234', 10);
+          setRoom(roomId, {
+            id: roomId,
+            name: `Room ${roomId.slice(0, 4)}`,
+            passwordHash: defaultHash,
+            isLocked: false,
+            autoLockEnabled: false,
+            canvasState: [],
+            mediaElements: [],
+            createdAt: new Date().toISOString(),
+          });
+          console.log(`[socket] Admin auto-provisioned room ${roomId}`);
+        } else {
+          socket.emit('error', { message: 'Room not found.' });
+          return;
+        }
       }
 
       socket.join(roomId);
       const room = getRoom(roomId);
-
-      // Check if joining with valid admin key directly
-      let role = 'observer';
-      if (adminKey && adminKey.trim() === ADMIN_SECRET) {
-        role = 'admin';
-      }
+      const role = isValidAdmin ? 'admin' : 'observer';
 
       socketRoles.set(socket.id, { roomId, role });
 
