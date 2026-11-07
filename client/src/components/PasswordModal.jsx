@@ -2,8 +2,8 @@ import { useState } from 'react';
 
 /**
  * PasswordModal
- * Presented to users who click "Enter Password to Edit" or "👑 Admin Login".
- * Supports both standard room passwords and master admin passcode elevation.
+ * Presented to users inside a room who want to unlock Editor Mode or Admin Mode.
+ * Has the two options above (Editor Mode vs Admin Mode).
  */
 export default function PasswordModal({
   error,
@@ -12,7 +12,7 @@ export default function PasswordModal({
   onClose,
   initialTab = 'user',
 }) {
-  const [tab, setTab] = useState(initialTab); // 'user' | 'admin'
+  const [tab, setTab] = useState(initialTab === 'admin' ? 'admin' : 'user'); // 'user' | 'admin'
   const [password, setPassword] = useState('');
   const [adminKey, setAdminKey] = useState('');
 
@@ -29,34 +29,34 @@ export default function PasswordModal({
   return (
     /* Backdrop */
     <div
-      className="fixed inset-0 bg-black/70 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+      className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       {/* Modal */}
       <div className="bg-surface border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-7 w-full max-w-sm">
-        {/* Tab Switcher */}
-        <div className="flex border-b border-white/10 mb-5">
+        {/* TWO OPTIONS ABOVE: Tab Selector */}
+        <div className="grid grid-cols-2 p-1 bg-canvas rounded-xl mb-5 border border-white/10">
           <button
             type="button"
             onClick={() => setTab('user')}
-            className={`flex-1 pb-2.5 text-xs font-bold transition-colors border-b-2 ${
+            className={`py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
               tab === 'user'
-                ? 'border-accent text-white'
-                : 'border-transparent text-muted hover:text-white'
+                ? 'bg-accent text-white shadow-md'
+                : 'text-muted hover:text-white'
             }`}
           >
-            🔑 Room Password
+            <span>✏️</span> Editor Mode
           </button>
           <button
             type="button"
             onClick={() => setTab('admin')}
-            className={`flex-1 pb-2.5 text-xs font-bold transition-colors border-b-2 ${
+            className={`py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
               tab === 'admin'
-                ? 'border-purple-500 text-purple-300'
-                : 'border-transparent text-muted hover:text-purple-300'
+                ? 'bg-purple-700 text-white shadow-md'
+                : 'text-muted hover:text-purple-300'
             }`}
           >
-            👑 Master Admin
+            <span>👑</span> Admin Mode
           </button>
         </div>
 
@@ -64,18 +64,20 @@ export default function PasswordModal({
           <div>
             <h2 className="text-lg font-bold text-white mb-1">Enter Room Password</h2>
             <p className="text-muted text-xs mb-4">
-              Enter this room's password to unlock drawing tools and editor mode.
+              Enter the room password set by the creator to unlock drawing tools and editor mode.
             </p>
 
             <form onSubmit={handleUserSubmit} className="space-y-4">
-              <input
-                type="password"
-                autoFocus
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter room password"
-                className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-accent"
-              />
+              <div>
+                <input
+                  type="password"
+                  autoFocus
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="Enter creator password"
+                  className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-accent"
+                />
+              </div>
 
               {error && <p className="text-red-400 text-xs">{error}</p>}
 
@@ -84,7 +86,7 @@ export default function PasswordModal({
                   type="submit"
                   className="flex-1 bg-accent hover:bg-accent-hover text-white font-semibold py-2 rounded-lg text-sm transition-colors"
                 >
-                  Unlock Editor
+                  Unlock as Editor
                 </button>
                 <button
                   type="button"
@@ -102,18 +104,20 @@ export default function PasswordModal({
               <span>👑</span> Master Admin Access
             </h2>
             <p className="text-muted text-xs mb-4">
-              Enter your master admin passcode to gain full management and editing access.
+              Fixed password: <strong className="text-purple-300">admin2026</strong>. Grants full rights to lock, edit, and delete.
             </p>
 
             <form onSubmit={handleAdminSubmit} className="space-y-4">
-              <input
-                type="password"
-                autoFocus
-                value={adminKey}
-                onChange={(e) => setAdminKey(e.target.value)}
-                placeholder="Enter master passcode (e.g. admin2026)"
-                className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-purple-500"
-              />
+              <div>
+                <input
+                  type="password"
+                  autoFocus
+                  value={adminKey}
+                  onChange={(e) => setAdminKey(e.target.value)}
+                  placeholder="Fixed password: admin2026"
+                  className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+              </div>
 
               {error && <p className="text-red-400 text-xs">{error}</p>}
 

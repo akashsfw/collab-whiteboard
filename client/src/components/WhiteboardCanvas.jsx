@@ -382,6 +382,8 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     zoomIn,
     zoomOut,
     resetView,
+    exportPNG: () => fabricRef.current?.toDataURL({ format: 'png', multiplier: 1 }),
+    exportJSON: () => fabricRef.current?.toJSON(),
 
     addShape(type) {
       const canvas = fabricRef.current;
