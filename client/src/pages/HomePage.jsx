@@ -1,21 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  fetchRooms,
-  createRoom,
-  verifyRoomPassword,
-  verifyAdminKey,
-} from '../lib/api.js';
-
-function storeAdminKey(key) {
-  if (key) {
-    localStorage.setItem('adminKey', key);
-    sessionStorage.setItem('adminKey', key);
-  } else {
-    localStorage.removeItem('adminKey');
-    sessionStorage.removeItem('adminKey');
-  }
-}
+import { fetchRooms, createRoom } from '../lib/api.js';
 
 export default function HomePage() {
   const navigate = useNavigate();
@@ -31,14 +16,6 @@ export default function HomePage() {
   const [newRoomAutoLock, setNewRoomAutoLock] = useState(false);
   const [createLoading, setCreateLoading] = useState(false);
   const [createError, setCreateError] = useState('');
-
-  // Modal for entering a room: Two Options Above (Editor Mode vs Admin Mode)
-  const [selectedRoom, setSelectedRoom] = useState(null);
-  const [entryMode, setEntryMode] = useState('editor'); // 'editor' | 'admin'
-  const [roomPassword, setRoomPassword] = useState('');
-  const [adminPassword, setAdminPassword] = useState('');
-  const [entryError, setEntryError] = useState('');
-  const [entryLoading, setEntryLoading] = useState(false);
 
   // ── Load rooms on mount ───────────────────────────────────────────────────
   useEffect(() => {
@@ -81,49 +58,6 @@ export default function HomePage() {
     }
   }
 
-  // ── Enter Room (Editor Mode or Admin Mode) ─────────────────────────────────
-  async function handleEnterRoom(e) {
-    e.preventDefault();
-    if (!selectedRoom) return;
-    setEntryError('');
-    setEntryLoading(true);
-
-    try {
-      if (entryMode === 'editor') {
-        // Editor Mode: creator's room password
-        if (!roomPassword.trim()) {
-          setEntryError('Please enter the room password.');
-          setEntryLoading(false);
-          return;
-        }
-        await verifyRoomPassword(selectedRoom.id, roomPassword.trim());
-        navigate(`/room/${selectedRoom.id}`);
-      } else {
-        // Admin Mode: fixed master password
-        if (!adminPassword.trim()) {
-          setEntryError('Please enter the admin password.');
-          setEntryLoading(false);
-          return;
-        }
-        await verifyAdminKey(adminPassword.trim());
-        storeAdminKey(adminPassword.trim());
-        navigate(`/room/${selectedRoom.id}`);
-      }
-    } catch (err) {
-      setEntryError(err.message || 'Incorrect password.');
-    } finally {
-      setEntryLoading(false);
-    }
-  }
-
-  function handleOpenRoomModal(room, defaultMode = 'editor') {
-    setSelectedRoom(room);
-    setEntryMode(defaultMode);
-    setRoomPassword('');
-    setAdminPassword('');
-    setEntryError('');
-  }
-
   // Filtered rooms
   const filteredRooms = rooms.filter((r) => {
     const q = searchQuery.toLowerCase();
@@ -138,7 +72,7 @@ export default function HomePage() {
       {/* ── Top Navigation Bar ────────────────────────────────────────────── */}
       <header className="border-b border-white/10 bg-surface/90 backdrop-blur-md px-4 sm:px-8 py-3.5 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3">
-          <span className="text-2xl font-black text-white tracking-tight">
+          <span className="text-xl sm:text-2xl font-black text-white tracking-tight">
             Collab<span className="text-accent">Board</span>
           </span>
           <span className="text-xs bg-white/5 border border-white/10 text-muted px-2.5 py-1 rounded-full font-mono">
@@ -149,7 +83,7 @@ export default function HomePage() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => navigate('/admin')}
-            className="text-xs sm:text-sm bg-purple-950/60 border border-purple-500/50 text-purple-300 hover:bg-purple-900/60 font-bold px-3.5 py-1.5 rounded-xl transition-all flex items-center gap-1.5"
+            className="text-xs sm:text-sm bg-purple-950/60 border border-purple-500/50 text-purple-300 hover:bg-purple-900/60 font-bold px-3 py-1.5 rounded-xl transition-all flex items-center gap-1.5"
           >
             <span>👑</span> Master Admin Portal
           </button>
@@ -166,12 +100,14 @@ export default function HomePage() {
               Real-time collaboration with <span className="text-accent">infinite freedom</span>.
             </h1>
             <p className="text-muted text-base sm:text-lg leading-relaxed">
-              Create and join collaborative rooms. Draw together, upload images,
-              embed interactive YouTube players, and flatten checkpoints with full Editor and Admin controls.
+              Create and join collaborative rooms. Everyone enters in Observer Mode by default and can easily switch to Editor or Admin mode inside the room.
             </p>
             <div className="flex flex-wrap gap-2 pt-2">
               <span className="text-xs bg-surface border border-white/10 px-3 py-1 rounded-full text-muted">
-                🛡️ Password Protected
+                👁️ Observer by Default
+              </span>
+              <span className="text-xs bg-surface border border-white/10 px-3 py-1 rounded-full text-muted">
+                ✏️ Password-protected Editor
               </span>
               <span className="text-xs bg-surface border border-white/10 px-3 py-1 rounded-full text-muted">
                 ♾️ Infinite Canvas & Pan
@@ -191,7 +127,7 @@ export default function HomePage() {
               <span>✦</span> Create a New Room
             </h2>
             <p className="text-muted text-xs mb-5">
-              Set a room name and creator password. Anyone with this password enters as an Editor.
+              Set a room name and creator password. Anyone with this password can unlock Editor Mode.
             </p>
 
             <form onSubmit={handleCreate} className="space-y-4">
@@ -258,7 +194,7 @@ export default function HomePage() {
                 <span>📁</span> All Created Rooms
               </h2>
               <p className="text-xs text-muted">
-                Common list of all rooms ever created, chronologically ordered.
+                Click any room to open and view immediately in Observer Mode.
               </p>
             </div>
 
@@ -306,7 +242,8 @@ export default function HomePage() {
                 return (
                   <div
                     key={room.id}
-                    className="bg-surface/90 border border-white/10 hover:border-white/20 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all shadow-lg hover:shadow-xl group"
+                    onClick={() => navigate(`/room/${room.id}`)}
+                    className="bg-surface/90 border border-white/10 hover:border-accent/40 rounded-2xl p-5 flex flex-col justify-between gap-4 transition-all shadow-lg hover:shadow-xl group cursor-pointer"
                   >
                     {/* Header */}
                     <div className="flex flex-col gap-1.5">
@@ -342,26 +279,26 @@ export default function HomePage() {
                     </div>
 
                     {/* Meta stats */}
-                    <div className="flex items-center gap-3 text-xs text-muted border-t border-white/5 pt-3">
-                      <span>🎨 {room.objectCount || 0} items</span>
-                      {room.mediaCount > 0 && <span>▶ {room.mediaCount} video(s)</span>}
+                    <div className="flex items-center justify-between text-xs text-muted border-t border-white/5 pt-3">
+                      <div className="flex items-center gap-3">
+                        <span>🎨 {room.objectCount || 0} items</span>
+                        {room.mediaCount > 0 && <span>▶ {room.mediaCount} video(s)</span>}
+                      </div>
+                      <span className="text-accent group-hover:underline text-[11px] font-semibold">
+                        Enter Room →
+                      </span>
                     </div>
 
-                    {/* Actions: Direct two-button choices or enter button */}
-                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-white/5">
-                      <button
-                        onClick={() => handleOpenRoomModal(room, 'editor')}
-                        className="bg-accent hover:bg-accent-hover text-white font-semibold text-xs py-2 rounded-lg transition-colors flex items-center justify-center gap-1"
-                      >
-                        <span>✏️</span> Editor Mode
-                      </button>
-                      <button
-                        onClick={() => handleOpenRoomModal(room, 'admin')}
-                        className="bg-purple-900/60 hover:bg-purple-800/80 border border-purple-500/40 text-purple-200 font-semibold text-xs py-2 rounded-lg transition-colors flex items-center justify-center gap-1"
-                      >
-                        <span>👑</span> Admin Mode
-                      </button>
-                    </div>
+                    {/* Direct One-Click Button to Enter Room in Observer Mode */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        navigate(`/room/${room.id}`);
+                      }}
+                      className="w-full bg-accent/90 hover:bg-accent text-white font-semibold text-xs py-2 rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <span>👁️</span> Enter Room (Observer Mode)
+                    </button>
                   </div>
                 );
               })}
@@ -369,129 +306,6 @@ export default function HomePage() {
           )}
         </section>
       </main>
-
-      {/* ── Room Entry Modal: Two Options Above (Editor Mode vs Admin Mode) ─── */}
-      {selectedRoom && (
-        <div
-          className="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-          onClick={(e) => { if (e.target === e.currentTarget) setSelectedRoom(null); }}
-        >
-          <div className="bg-surface border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-7 w-full max-w-sm">
-            {/* Modal Room Title */}
-            <div className="mb-4">
-              <h3 className="text-base font-bold text-white truncate">
-                {selectedRoom.name || selectedRoom.id}
-              </h3>
-              <p className="text-muted text-xs font-mono">ID: {selectedRoom.id}</p>
-            </div>
-
-            {/* TWO OPTIONS ABOVE: Tab Selector */}
-            <div className="grid grid-cols-2 p-1 bg-canvas rounded-xl mb-5 border border-white/10">
-              <button
-                type="button"
-                onClick={() => { setEntryMode('editor'); setEntryError(''); }}
-                className={`py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
-                  entryMode === 'editor'
-                    ? 'bg-accent text-white shadow-md'
-                    : 'text-muted hover:text-white'
-                }`}
-              >
-                <span>✏️</span> Editor Mode
-              </button>
-              <button
-                type="button"
-                onClick={() => { setEntryMode('admin'); setEntryError(''); }}
-                className={`py-2 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${
-                  entryMode === 'admin'
-                    ? 'bg-purple-700 text-white shadow-md'
-                    : 'text-muted hover:text-purple-300'
-                }`}
-              >
-                <span>👑</span> Admin Mode
-              </button>
-            </div>
-
-            {/* Form for selected mode */}
-            <form onSubmit={handleEnterRoom} className="space-y-4">
-              {entryMode === 'editor' ? (
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1" htmlFor="creator-pw">
-                    Room Creator Password
-                  </label>
-                  <input
-                    id="creator-pw"
-                    type="password"
-                    autoFocus
-                    value={roomPassword}
-                    onChange={(e) => setRoomPassword(e.target.value)}
-                    placeholder="Enter password set by creator"
-                    className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-accent"
-                  />
-                  <p className="text-[11px] text-muted mt-1.5">
-                    For normal users who know the password created for this room.
-                  </p>
-                </div>
-              ) : (
-                <div>
-                  <label className="block text-xs font-semibold text-muted mb-1" htmlFor="fixed-admin-pw">
-                    Master Admin Password
-                  </label>
-                  <input
-                    id="fixed-admin-pw"
-                    type="password"
-                    autoFocus
-                    value={adminPassword}
-                    onChange={(e) => setAdminPassword(e.target.value)}
-                    placeholder="Enter admin password"
-                    className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  />
-                  <p className="text-[11px] text-purple-300/80 mt-1.5">
-                    Requires master admin privileges. Grants full rights to lock, edit, and delete.
-                  </p>
-                </div>
-              )}
-
-              {entryError && <p className="text-red-400 text-xs">{entryError}</p>}
-
-              <div className="flex gap-2.5 pt-1">
-                <button
-                  type="submit"
-                  disabled={entryLoading}
-                  className={`flex-1 font-semibold py-2 rounded-lg text-sm transition-colors text-white ${
-                    entryMode === 'editor'
-                      ? 'bg-accent hover:bg-accent-hover'
-                      : 'bg-purple-700 hover:bg-purple-600'
-                  }`}
-                >
-                  {entryLoading
-                    ? 'Verifying…'
-                    : entryMode === 'editor'
-                    ? 'Enter as Editor'
-                    : 'Enter as Admin'}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setSelectedRoom(null)}
-                  className="px-4 border border-white/10 text-muted hover:text-white py-2 rounded-lg text-sm transition-colors"
-                >
-                  Cancel
-                </button>
-              </div>
-
-              {/* Observer option */}
-              <div className="text-center pt-2 border-t border-white/5">
-                <button
-                  type="button"
-                  onClick={() => navigate(`/room/${selectedRoom.id}`)}
-                  className="text-xs text-muted hover:text-white transition-colors"
-                >
-                  Just want to view? Enter in Read-Only Observer Mode →
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

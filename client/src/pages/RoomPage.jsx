@@ -27,7 +27,7 @@ export default function RoomPage() {
   const navigate = useNavigate();
 
   const [roomMeta, setRoomMeta] = useState(null);       // null = loading, false = not found
-  const [role, setRole] = useState('observer');           // 'observer' | 'editor' | 'admin'
+  const [role, setRole] = useState('observer');           // 'observer' | 'editor' | 'admin' (Observer by default)
   const [isLocked, setIsLocked] = useState(false);       // Admin permanent lock
   const [autoLockEnabled, setAutoLockEnabled] = useState(false); // Auto-lock for all normal users
   const [showPasswordModal, setShowPasswordModal] = useState(false);
@@ -35,10 +35,15 @@ export default function RoomPage() {
   const [authError, setAuthError] = useState('');
   const [copied, setCopied] = useState(false);
 
+  // Dropdown menus
+  const [showModeMenu, setShowModeMenu] = useState(false);
+  const [showAdminMenu, setShowAdminMenu] = useState(false);
+  const modeMenuRef = useRef(null);
+  const adminMenuRef = useRef(null);
+
   // Lock Timer state
   const [timerSecondsLeft, setTimerSecondsLeft] = useState(null);
   const timerIntervalRef = useRef(null);
-  const [showTimerMenu, setShowTimerMenu] = useState(false);
 
   // Claim/setup room state when roomMeta === false
   const [claimPassword, setClaimPassword] = useState('');
@@ -46,7 +51,7 @@ export default function RoomPage() {
   const [claimLoading, setClaimLoading] = useState(false);
 
   // Shared state between Canvas and MediaOverlayLayer
-  const [activeTool, setActiveTool] = useState('select');
+  const [activeTool, setActiveTool] = useState('hand');
   const [activeColor, setActiveColor] = useState('#ffffff');
   const [brushSize, setBrushSize] = useState(4);
 
@@ -59,14 +64,31 @@ export default function RoomPage() {
 
   const canvasRef = useRef(null);
 
+  // ── Click outside listeners for dropdown menus ───────────────────────────
+  useEffect(() => {
+    function handleClickOutside(e) {
+      if (modeMenuRef.current && !modeMenuRef.current.contains(e.target)) {
+        setShowModeMenu(false);
+      }
+      if (adminMenuRef.current && !adminMenuRef.current.contains(e.target)) {
+        setShowAdminMenu(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    document.addEventListener('touchstart', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('touchstart', handleClickOutside);
+    };
+  }, []);
+
   // ── 1. Verify room exists ──────────────────────────────────────────────────
   useEffect(() => {
     loadRoomData();
   }, [roomId]);
 
   function loadRoomData() {
-    const adminKey = getStoredAdminKey();
-    fetchRoom(roomId, adminKey).then((data) => {
+    fetchRoom(roomId).then((data) => {
       if (!data) {
         setRoomMeta(false);
       } else {
@@ -77,20 +99,22 @@ export default function RoomPage() {
     });
   }
 
-  // ── 2. Connect socket and join room ───────────────────────────────────────
+  // ── 2. Connect socket and join room (Always as Observer by default) ────────
   useEffect(() => {
     if (!roomMeta) return;
 
     const socket = getSocket();
     if (!socket.connected) socket.connect();
 
-    const storedAdminKey = getStoredAdminKey();
+    // Default to Observer mode whenever entering the room
+    setRole('observer');
+    setActiveTool('hand');
 
-    // Join room with optional admin key
-    socket.emit('room:join', { roomId, adminKey: storedAdminKey });
+    socket.emit('room:join', { roomId, adminKey: '' });
 
-    socket.on('room:joined', ({ role: r, isLocked: il, autoLockEnabled: al, canvasState, mediaElements: me }) => {
-      setRole(r);
+    socket.on('room:joined', ({ isLocked: il, autoLockEnabled: al, canvasState, mediaElements: me }) => {
+      setRole('observer');
+      setActiveTool('hand');
       setIsLocked(il);
       setAutoLockEnabled(al);
       setInitialCanvas(canvasState);
@@ -100,6 +124,9 @@ export default function RoomPage() {
     socket.on('auth:result', ({ success, role: r, message, isLocked: il, autoLockEnabled: al }) => {
       if (success) {
         setRole(r);
+        if (r === 'editor' || r === 'admin') {
+          setActiveTool('pen');
+        }
         if (il !== undefined) setIsLocked(il);
         if (al !== undefined) setAutoLockEnabled(al);
         setShowPasswordModal(false);
@@ -145,7 +172,7 @@ export default function RoomPage() {
     }
 
     if (timerSecondsLeft <= 0) {
-      // Timer finished -> lock room automatically!
+      // Timer finished -> lock room automatically
       clearInterval(timerIntervalRef.current);
       setTimerSecondsLeft(null);
       getSocket().emit('room:toggle-lock', { roomId, isLocked: true });
@@ -163,13 +190,47 @@ export default function RoomPage() {
   }, [timerSecondsLeft, roomId]);
 
   function startLockTimer(minutes) {
-    setShowTimerMenu(false);
     setTimerSecondsLeft(minutes * 60);
   }
 
   function cancelLockTimer() {
-    setShowTimerMenu(false);
     setTimerSecondsLeft(null);
+  }
+
+  // ── Mode Switcher Logic ──────────────────────────────────────────────────
+  function handleSelectMode(targetMode) {
+    setShowModeMenu(false);
+    if (targetMode === role) return;
+
+    if (targetMode === 'observer') {
+      storeAdminKey('');
+      setRole('observer');
+      setActiveTool('hand');
+      getSocket().emit('room:join', { roomId, adminKey: '' });
+      return;
+    }
+
+    if (targetMode === 'editor') {
+      if (isLocked) {
+        alert('This room has been permanently locked by the administrator.');
+        return;
+      }
+      if (autoLockEnabled) {
+        alert('Auto-Lock is active: Canvas editing is locked for normal users.');
+        return;
+      }
+      setPasswordModalTab('user');
+      setAuthError('');
+      setShowPasswordModal(true);
+      return;
+    }
+
+    if (targetMode === 'admin') {
+      setPasswordModalTab('admin');
+      setAuthError('');
+      setShowPasswordModal(true);
+      return;
+    }
   }
 
   // ── Handlers ──────────────────────────────────────────────────────────────
@@ -182,12 +243,6 @@ export default function RoomPage() {
     setAuthError('');
     getSocket().emit('room:admin-auth', { roomId, adminKey });
     storeAdminKey(adminKey);
-  }
-
-  function handleAdminLogout() {
-    storeAdminKey('');
-    setRole('observer');
-    getSocket().emit('room:join', { roomId, adminKey: '' });
   }
 
   function handleToggleLock() {
@@ -315,7 +370,6 @@ export default function RoomPage() {
             </p>
           </div>
 
-          {/* Form to start room */}
           <form onSubmit={handleClaimRoom} className="space-y-3 border-t border-white/10 pt-4">
             <label className="block text-xs font-semibold text-muted">
               Set Password to Initialize this Room:
@@ -337,7 +391,6 @@ export default function RoomPage() {
             </button>
           </form>
 
-          {/* Admin one-click provision */}
           <div className="border-t border-white/10 pt-4 flex flex-col gap-2">
             <button
               type="button"
@@ -363,7 +416,6 @@ export default function RoomPage() {
   }
 
   const isAdmin = role === 'admin';
-  // Normal editors are blocked from editing if the room is locked or autolocked
   const isEditingAllowed = isAdmin || (role === 'editor' && !isLocked && !autoLockEnabled);
 
   // Format countdown string mm:ss
@@ -375,54 +427,53 @@ export default function RoomPage() {
   };
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-canvas">
-      {/* ── Top Bar ─────────────────────────────────────────────────────── */}
-      <header className="flex items-center justify-between px-3 sm:px-4 py-2 bg-surface border-b border-white/10 z-20 shrink-0 gap-2">
-        <div className="flex items-center gap-2 sm:gap-3 min-w-0">
+    <div className="flex flex-col h-screen h-[100dvh] overflow-hidden bg-canvas">
+      {/* ── Top Bar (Mobile-Hardened, No Overlaps) ─────────────────────────── */}
+      <header className="h-14 px-3 sm:px-4 bg-surface border-b border-white/10 z-30 flex items-center justify-between flex-nowrap shrink-0 relative select-none">
+        {/* Left: Logo & Room Name */}
+        <div className="flex items-center gap-2 sm:gap-3 min-w-0 shrink">
           <button
             onClick={() => navigate('/')}
             title="Back to All Rooms"
-            className="text-white font-bold text-base sm:text-lg hover:text-accent transition-colors shrink-0"
+            className="text-white font-bold text-sm sm:text-base hover:text-accent transition-colors shrink-0 whitespace-nowrap"
           >
             ← Collab<span className="text-accent">Board</span>
           </button>
-          <span className="hidden sm:inline text-muted text-xs font-mono bg-canvas px-2 py-1 rounded truncate max-w-[150px]">
+          <span className="hidden sm:inline-block text-muted text-xs font-mono bg-canvas px-2 py-0.5 rounded truncate max-w-[120px] md:max-w-[180px]">
             {roomMeta?.name || roomId}
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 flex-wrap">
+        {/* Right: Status Badges, Copy Link, Admin Tools, and 3-Mode Dropdown */}
+        <div className="flex items-center gap-1.5 sm:gap-2 shrink-0 flex-nowrap">
           {/* Status Badges */}
           {isLocked && (
-            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-950/80 text-red-300 border border-red-700">
-              🔒 Locked
+            <span
+              title="Room is locked by administrator"
+              className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-950/80 text-red-300 border border-red-700 whitespace-nowrap shrink-0"
+            >
+              <span className="hidden sm:inline">🔒 Locked</span>
+              <span className="sm:hidden">🔒</span>
             </span>
           )}
+
           {autoLockEnabled && !isLocked && (
-            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-700">
-              ⏱️ Auto-Lock
+            <span
+              title="Auto-Lock active for normal users"
+              className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-700 whitespace-nowrap shrink-0"
+            >
+              <span className="hidden sm:inline">⏱️ Auto-Lock</span>
+              <span className="sm:hidden">⏱️</span>
             </span>
           )}
+
           {timerSecondsLeft !== null && (
-            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-purple-950 text-purple-200 border border-purple-500 animate-pulse">
-              ⏱️ Locks in {formatTimer(timerSecondsLeft)}
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-purple-950 text-purple-200 border border-purple-500 whitespace-nowrap animate-pulse shrink-0">
+              ⏱️ {formatTimer(timerSecondsLeft)}
             </span>
           )}
 
-          {/* Current Role badge */}
-          <span
-            className={`text-[11px] sm:text-xs font-semibold px-2 sm:px-3 py-1 rounded-full shrink-0 ${
-              isAdmin
-                ? 'bg-purple-900/70 text-purple-200 border border-purple-500 font-bold'
-                : isEditingAllowed
-                ? 'bg-green-900/60 text-green-300 border border-green-700'
-                : 'bg-yellow-900/60 text-yellow-300 border border-yellow-700'
-            }`}
-          >
-            {isAdmin ? '👑 Admin' : isEditingAllowed ? '✏️ Editor' : '👁️ Observer'}
-          </span>
-
-          {/* Copy link */}
+          {/* Copy Link */}
           <button
             onClick={() => {
               navigator.clipboard.writeText(window.location.href);
@@ -430,143 +481,216 @@ export default function RoomPage() {
               setTimeout(() => setCopied(false), 2000);
             }}
             title="Copy Room Link"
-            className="text-xs text-muted hover:text-white border border-white/10 px-2 sm:px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 shrink-0"
+            className="text-xs text-muted hover:text-white border border-white/10 px-2 py-1.5 rounded-xl transition-colors flex items-center gap-1 shrink-0"
           >
             <span>{copied ? '✓' : '🔗'}</span>
-            <span className="hidden sm:inline">{copied ? 'Copied!' : 'Copy'}</span>
+            <span className="hidden sm:inline">{copied ? 'Copied' : 'Share'}</span>
           </button>
 
-          {/* TWO OPTIONS ABOVE (Shown when NOT in Admin mode) */}
-          {!isAdmin ? (
-            <div className="flex items-center gap-1">
-              {role !== 'editor' && !isLocked && !autoLockEnabled && (
-                <button
-                  onClick={() => { setPasswordModalTab('user'); setShowPasswordModal(true); setAuthError(''); }}
-                  className="bg-accent hover:bg-accent-hover text-white text-xs font-semibold px-2.5 py-1 rounded-lg transition-colors shrink-0 flex items-center gap-1"
-                >
-                  <span>✏️</span> Editor Mode
-                </button>
-              )}
+          {/* Admin Tools Menu Button (Only visible in Admin Mode) */}
+          {isAdmin && (
+            <div className="relative" ref={adminMenuRef}>
               <button
-                onClick={() => { setPasswordModalTab('admin'); setShowPasswordModal(true); setAuthError(''); }}
-                className="bg-purple-900/70 hover:bg-purple-800 border border-purple-500/50 text-purple-200 text-xs font-semibold px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 shrink-0"
+                onClick={() => {
+                  setShowAdminMenu((prev) => !prev);
+                  setShowModeMenu(false);
+                }}
+                title="Admin Management Tools"
+                className="text-xs font-semibold px-2 sm:px-2.5 py-1.5 rounded-xl bg-purple-950/70 border border-purple-500/60 text-purple-200 hover:bg-purple-900/80 transition-all flex items-center gap-1 shrink-0"
               >
-                <span>👑</span> Admin Mode
-              </button>
-            </div>
-          ) : (
-            /* ALL ADMIN FEATURES (Shown when in Admin mode) */
-            <div className="flex items-center gap-1.5 flex-wrap">
-              {/* 1. Permanent Lock Toggle */}
-              <button
-                onClick={handleToggleLock}
-                className={`text-xs px-2.5 py-1 rounded-lg font-medium border transition-colors flex items-center gap-1 ${
-                  isLocked
-                    ? 'bg-red-950/60 border-red-700 text-red-300'
-                    : 'border-white/10 text-muted hover:text-white'
-                }`}
-                title="Lock room permanently so no further edits are allowed"
-              >
-                <span>{isLocked ? '🔓' : '🔒'}</span>
-                <span>{isLocked ? 'Unlock Room' : 'Lock Room'}</span>
+                <span>⚙️</span>
+                <span className="hidden sm:inline">Controls</span>
+                <span className="text-[10px] opacity-70">▾</span>
               </button>
 
-              {/* 2. Lock Timer / Auto-Lock Dropdown */}
-              <div className="relative">
-                <button
-                  onClick={() => setShowTimerMenu((prev) => !prev)}
-                  className={`text-xs px-2 py-1 rounded-lg font-medium border transition-colors flex items-center gap-1 ${
-                    autoLockEnabled || timerSecondsLeft !== null
-                      ? 'bg-amber-950/60 border-amber-700 text-amber-300'
-                      : 'border-white/10 text-muted hover:text-white'
-                  }`}
-                  title="Configure Auto-Lock or Lock Timer"
-                >
-                  <span>⏱️</span>
-                  <span>Timer</span>
-                </button>
-
-                {showTimerMenu && (
-                  <div className="absolute right-0 top-8 bg-surface border border-white/10 rounded-xl shadow-2xl p-2 z-50 flex flex-col gap-1 w-44 text-xs">
-                    <button
-                      onClick={handleToggleAutoLock}
-                      className="text-left px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-muted hover:text-white transition-colors"
-                    >
-                      {autoLockEnabled ? 'Disable Auto-Lock' : 'Enable Auto-Lock'}
-                    </button>
-                    <div className="border-t border-white/5 my-0.5" />
-                    <button
-                      onClick={() => startLockTimer(5)}
-                      className="text-left px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-muted hover:text-white transition-colors"
-                    >
-                      Lock in 5 Minutes
-                    </button>
-                    <button
-                      onClick={() => startLockTimer(15)}
-                      className="text-left px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-muted hover:text-white transition-colors"
-                    >
-                      Lock in 15 Minutes
-                    </button>
-                    <button
-                      onClick={() => startLockTimer(30)}
-                      className="text-left px-2.5 py-1.5 rounded-lg hover:bg-white/5 text-muted hover:text-white transition-colors"
-                    >
-                      Lock in 30 Minutes
-                    </button>
-                    {timerSecondsLeft !== null && (
-                      <button
-                        onClick={cancelLockTimer}
-                        className="text-left px-2.5 py-1.5 rounded-lg text-red-400 hover:bg-red-950/40 transition-colors"
-                      >
-                        Cancel Timer
-                      </button>
-                    )}
+              {showAdminMenu && (
+                <div className="absolute right-0 top-11 bg-surface/98 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl p-2 z-50 flex flex-col gap-1 w-52 text-xs animate-in fade-in select-none">
+                  <div className="px-2 py-1 text-[10px] font-bold text-purple-300 uppercase tracking-wider">
+                    Admin Tools
                   </div>
-                )}
-              </div>
 
-              {/* 3. Export Options */}
-              <div className="flex items-center gap-1">
-                <button
-                  onClick={handleExportJSON}
-                  title="Export Room JSON data (canvas + media elements)"
-                  className="text-xs bg-surface border border-white/10 text-muted hover:text-white px-2 py-1 rounded-lg transition-colors flex items-center gap-1"
-                >
-                  <span>📥</span> JSON
-                </button>
-                <button
-                  onClick={handleExportPNG}
-                  title="Export canvas as PNG image"
-                  className="text-xs bg-surface border border-white/10 text-muted hover:text-white px-2 py-1 rounded-lg transition-colors flex items-center gap-1"
-                >
-                  <span>🖼️</span> PNG
-                </button>
-              </div>
+                  {/* Toggle Permanent Lock */}
+                  <button
+                    onClick={() => { handleToggleLock(); setShowAdminMenu(false); }}
+                    className={`flex items-center gap-2 px-2.5 py-2 rounded-xl transition-colors text-left ${
+                      isLocked ? 'bg-red-950/60 text-red-200 hover:bg-red-900/60' : 'hover:bg-white/5 text-muted hover:text-white'
+                    }`}
+                  >
+                    <span>{isLocked ? '🔓' : '🔒'}</span>
+                    <span>{isLocked ? 'Unlock Room' : 'Lock Room (Permanent)'}</span>
+                  </button>
 
-              {/* 4. Delete Room */}
-              <button
-                onClick={handleDeleteThisRoom}
-                title="Permanently delete this entire room"
-                className="text-xs text-red-400 hover:text-red-300 border border-red-900/60 hover:border-red-700 bg-red-950/30 px-2 py-1 rounded-lg transition-colors flex items-center gap-1"
-              >
-                <span>🗑️</span>
-              </button>
+                  {/* Toggle AutoLock */}
+                  <button
+                    onClick={() => { handleToggleAutoLock(); setShowAdminMenu(false); }}
+                    className={`flex items-center gap-2 px-2.5 py-2 rounded-xl transition-colors text-left ${
+                      autoLockEnabled ? 'bg-amber-950/60 text-amber-200 hover:bg-amber-900/60' : 'hover:bg-white/5 text-muted hover:text-white'
+                    }`}
+                  >
+                    <span>⏱️</span>
+                    <span>{autoLockEnabled ? 'Disable Auto-Lock' : 'Enable Auto-Lock'}</span>
+                  </button>
 
-              {/* Exit Admin Mode */}
-              <button
-                onClick={handleAdminLogout}
-                className="text-[11px] text-muted hover:text-white border border-white/10 px-2 py-1 rounded-lg transition-colors"
-              >
-                Exit
-              </button>
+                  {/* Timed Locks */}
+                  <div className="border-t border-white/10 my-0.5" />
+                  <div className="px-2 py-0.5 text-[10px] font-semibold text-muted/60">
+                    Timed Auto-Lock:
+                  </div>
+                  <button
+                    onClick={() => { startLockTimer(5); setShowAdminMenu(false); }}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-white/5 text-muted hover:text-white transition-colors text-left"
+                  >
+                    <span>⏱️</span> Lock in 5 minutes
+                  </button>
+                  <button
+                    onClick={() => { startLockTimer(15); setShowAdminMenu(false); }}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-white/5 text-muted hover:text-white transition-colors text-left"
+                  >
+                    <span>⏱️</span> Lock in 15 minutes
+                  </button>
+                  <button
+                    onClick={() => { startLockTimer(30); setShowAdminMenu(false); }}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-white/5 text-muted hover:text-white transition-colors text-left"
+                  >
+                    <span>⏱️</span> Lock in 30 minutes
+                  </button>
+                  {timerSecondsLeft !== null && (
+                    <button
+                      onClick={() => { cancelLockTimer(); setShowAdminMenu(false); }}
+                      className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl text-red-400 hover:bg-red-950/40 transition-colors text-left"
+                    >
+                      <span>❌</span> Cancel Active Timer
+                    </button>
+                  )}
+
+                  {/* Export Options */}
+                  <div className="border-t border-white/10 my-0.5" />
+                  <button
+                    onClick={() => { handleExportPNG(); setShowAdminMenu(false); }}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-white/5 text-muted hover:text-white transition-colors text-left"
+                  >
+                    <span>🖼️</span> Export as PNG Image
+                  </button>
+                  <button
+                    onClick={() => { handleExportJSON(); setShowAdminMenu(false); }}
+                    className="flex items-center gap-2 px-2.5 py-1.5 rounded-xl hover:bg-white/5 text-muted hover:text-white transition-colors text-left"
+                  >
+                    <span>📥</span> Export Room Data (JSON)
+                  </button>
+
+                  {/* Delete Room */}
+                  <div className="border-t border-white/10 my-0.5" />
+                  <button
+                    onClick={() => { handleDeleteThisRoom(); setShowAdminMenu(false); }}
+                    className="flex items-center gap-2 px-2.5 py-2 rounded-xl text-red-400 hover:bg-red-950/50 hover:text-red-300 transition-colors text-left font-semibold"
+                  >
+                    <span>🗑️</span> Delete Room
+                  </button>
+                </div>
+              )}
             </div>
           )}
+
+          {/* ── 3-MODE DROPDOWN SWITCHER ────────────────────────────────────── */}
+          <div className="relative" ref={modeMenuRef}>
+            <button
+              onClick={() => {
+                setShowModeMenu((prev) => !prev);
+                setShowAdminMenu(false);
+              }}
+              title="Click to switch mode (Observer, Editor, Admin)"
+              className={`text-xs font-semibold px-2.5 py-1.5 rounded-xl border flex items-center gap-1.5 transition-all shadow-sm ${
+                isAdmin
+                  ? 'bg-purple-950/80 border-purple-500/70 text-purple-200 hover:bg-purple-900/80'
+                  : isEditingAllowed
+                  ? 'bg-green-950/70 border-green-600/70 text-green-300 hover:bg-green-900/70'
+                  : 'bg-white/5 border-white/10 text-muted hover:text-white hover:border-white/20'
+              }`}
+            >
+              <span>{isAdmin ? '👑' : isEditingAllowed ? '✏️' : '👁️'}</span>
+              <span className="font-medium">
+                {isAdmin ? 'Admin' : isEditingAllowed ? 'Editor' : 'Observer'}
+              </span>
+              <span className="text-[10px] opacity-70">▾</span>
+            </button>
+
+            {showModeMenu && (
+              <div className="absolute right-0 top-11 bg-surface/98 backdrop-blur-xl border border-white/15 rounded-2xl shadow-2xl p-1.5 z-50 flex flex-col gap-1 w-56 text-xs animate-in fade-in select-none">
+                <div className="px-2 py-1 text-[10px] font-bold text-muted/70 uppercase tracking-wider">
+                  Select Room Mode
+                </div>
+
+                {/* 1. Observer Mode */}
+                <button
+                  onClick={() => handleSelectMode('observer')}
+                  className={`flex items-start justify-between p-2 rounded-xl text-left transition-colors ${
+                    role === 'observer'
+                      ? 'bg-white/10 text-white font-semibold'
+                      : 'hover:bg-white/5 text-muted hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="text-sm mt-0.5">👁️</span>
+                    <div>
+                      <div className="font-semibold text-white">Observer Mode</div>
+                      <div className="text-[11px] text-muted">View only (Default)</div>
+                    </div>
+                  </div>
+                  {role === 'observer' && <span className="text-green-400 font-bold text-xs mt-0.5">✓</span>}
+                </button>
+
+                {/* 2. Editor Mode */}
+                <button
+                  onClick={() => handleSelectMode('editor')}
+                  className={`flex items-start justify-between p-2 rounded-xl text-left transition-colors ${
+                    role === 'editor'
+                      ? 'bg-green-950/60 text-green-200 border border-green-700/50 font-semibold'
+                      : 'hover:bg-white/5 text-muted hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="text-sm mt-0.5">✏️</span>
+                    <div>
+                      <div className="font-semibold text-white">Editor Mode</div>
+                      <div className="text-[11px] text-muted">
+                        {isLocked
+                          ? 'Locked by Admin'
+                          : autoLockEnabled
+                          ? 'Auto-Locked'
+                          : 'Draw & write (Password)'}
+                      </div>
+                    </div>
+                  </div>
+                  {role === 'editor' && <span className="text-green-400 font-bold text-xs mt-0.5">✓</span>}
+                </button>
+
+                {/* 3. Admin Mode */}
+                <button
+                  onClick={() => handleSelectMode('admin')}
+                  className={`flex items-start justify-between p-2 rounded-xl text-left transition-colors ${
+                    role === 'admin'
+                      ? 'bg-purple-950/70 text-purple-200 border border-purple-600/50 font-semibold'
+                      : 'hover:bg-white/5 text-muted hover:text-white'
+                  }`}
+                >
+                  <div className="flex items-start gap-2">
+                    <span className="text-sm mt-0.5">👑</span>
+                    <div>
+                      <div className="font-semibold text-white">Admin Mode</div>
+                      <div className="text-[11px] text-muted">Manage, lock & export</div>
+                    </div>
+                  </div>
+                  {role === 'admin' && <span className="text-purple-300 font-bold text-xs mt-0.5">✓</span>}
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
       {/* ── Lock Warning Banner for Non-Admins ────────────────────────────── */}
       {(isLocked || autoLockEnabled) && !isAdmin && (
-        <div className="bg-amber-950/90 border-b border-amber-800/60 px-4 py-1.5 text-xs text-amber-200 text-center flex items-center justify-center gap-2 z-20">
+        <div className="bg-amber-950/90 border-b border-amber-800/60 px-4 py-1.5 text-xs text-amber-200 text-center flex items-center justify-center gap-2 z-20 shrink-0">
           <span>🔒</span>
           <span>
             {isLocked
@@ -577,7 +701,7 @@ export default function RoomPage() {
       )}
 
       {/* ── Main Canvas Area ────────────────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 min-w-0 overflow-hidden relative">
         {/* Sidebar Toolbar (Visible if editor is allowed to edit) */}
         {isEditingAllowed && (
           <Toolbar
@@ -600,7 +724,7 @@ export default function RoomPage() {
 
         {/* Canvas + Overlay wrapper with dynamic infinite dot grid */}
         <div
-          className="relative flex-1 overflow-hidden"
+          className="relative flex-1 min-h-0 min-w-0 h-full w-full overflow-hidden"
           style={{
             backgroundColor: '#1e1e2e',
             backgroundImage: 'radial-gradient(rgba(255, 255, 255, 0.16) 1.2px, transparent 1.2px)',
@@ -662,7 +786,7 @@ export default function RoomPage() {
         </div>
       </div>
 
-      {/* Password Modal with TWO OPTIONS ABOVE */}
+      {/* Password Modal for switching to Editor or Admin */}
       {showPasswordModal && (
         <PasswordModal
           error={authError}

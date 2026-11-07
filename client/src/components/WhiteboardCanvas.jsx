@@ -486,27 +486,49 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     if (!containerRef.current) return;
 
     const el = containerRef.current;
+    const initialWidth = el?.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 800);
+    const initialHeight = el?.clientHeight || (typeof window !== 'undefined' ? window.innerHeight - 56 : 600);
+
     const canvas = new fabric.Canvas('whiteboard-canvas', {
-      width: el.clientWidth,
-      height: el.clientHeight,
+      width: initialWidth,
+      height: initialHeight,
       backgroundColor: 'transparent',
-      selection: isEditorRef.current,
+      selection: isEditorRef.current && activeToolRef.current !== 'hand',
       isDrawingMode: false,
       preserveObjectStacking: true,
     });
     fabricRef.current = canvas;
 
-    // Responsive resize
-    const observer = new ResizeObserver(() => {
-      canvas.setDimensions({ width: el.clientWidth, height: el.clientHeight });
-      canvas.renderAll();
+    // Responsive resize handler
+    const updateDimensions = () => {
+      if (!el || !fabricRef.current) return;
+      const w = el.clientWidth || window.innerWidth;
+      const h = el.clientHeight || (window.innerHeight - 56);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.setDimensions({ width: w, height: h });
+        canvas.renderAll();
+      }
+    };
+
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      const w = entry?.contentRect?.width || el.clientWidth || window.innerWidth;
+      const h = entry?.contentRect?.height || el.clientHeight || (window.innerHeight - 56);
+      if (w > 0 && h > 0 && (canvas.width !== w || canvas.height !== h)) {
+        canvas.setDimensions({ width: w, height: h });
+        canvas.renderAll();
+      }
     });
     observer.observe(el);
 
-    // Mouse / Touch Down (Support Pan with Hand tool, Space, Alt, or Middle Mouse)
+    window.addEventListener('resize', updateDimensions);
+    window.addEventListener('orientationchange', updateDimensions);
+
+    // Mouse / Touch Down (Support Pan with Hand tool, Observer mode, Space, Alt, or Middle Mouse)
     canvas.on('mouse:down', (opt) => {
       const isPanTrigger =
         activeToolRef.current === 'hand' ||
+        !isEditorRef.current ||
         opt.e?.altKey ||
         opt.e?.button === 1 ||
         spacePressed.current;
@@ -725,6 +747,8 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
     return () => {
       observer.disconnect();
+      window.removeEventListener('resize', updateDimensions);
+      window.removeEventListener('orientationchange', updateDimensions);
       if (upperEl) {
         upperEl.removeEventListener('touchstart', handleTouchStart);
         upperEl.removeEventListener('touchmove', handleTouchMove);
