@@ -211,6 +211,33 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     });
   }, [roomId, recordSnapshot, pushSnapshotToUndo, enforceCheckpointLock]);
 
+  // ── Hide / Unhide Selected Objects (Replaces destructive deletion) ────────
+  const toggleHideSelected = useCallback(() => {
+    const canvas = fabricRef.current;
+    if (!canvas || !isEditorRef.current) return;
+
+    const activeObjects = canvas.getActiveObjects();
+    if (!activeObjects || activeObjects.length === 0) return;
+
+    const validObjects = activeObjects.filter((o) => !o.isCheckpoint);
+    if (validObjects.length === 0) return;
+
+    recordSnapshot();
+    validObjects.forEach((obj) => {
+      const isHidden = obj.opacity === 0;
+      obj.set({ opacity: isHidden ? 1 : 0 });
+    });
+
+    canvas.renderAll();
+    pushSnapshotToUndo();
+
+    const socket = getSocket();
+    socket.emit('canvas:sync', {
+      roomId,
+      canvasJSON: canvas.toJSON(['hyperlink', 'isCheckpoint', 'opacity']),
+    });
+  }, [roomId, recordSnapshot, pushSnapshotToUndo]);
+
   // ── Save Checkpoint (Flatten canvas into an immovable, locked base) ──────
   const saveCheckpoint = useCallback(async () => {
     const canvas = fabricRef.current;
@@ -350,6 +377,7 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
     undo,
     redo,
     deleteSelected,
+    toggleHideSelected,
     saveCheckpoint,
     zoomIn,
     zoomOut,
@@ -637,7 +665,8 @@ const WhiteboardCanvas = forwardRef(function WhiteboardCanvas(
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault();
-        deleteSelected();
+        // Non-destructive: Hide rather than delete permanently
+        toggleHideSelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         if (e.shiftKey) {

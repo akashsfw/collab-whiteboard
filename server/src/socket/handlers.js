@@ -1,48 +1,71 @@
 import bcrypt from 'bcryptjs';
 import { getRoom, setRoom, roomExists } from '../store/rooms.js';
 
-/**
- * Per-socket role map: socketId → { roomId, role: 'observer'|'editor' }
- * Stored in process memory — good enough for a single-node server.
- */
-const socketRoles = new Map(); // socketId → { roomId, role }
+const ADMIN_SECRET = process.env.ADMIN_SECRET || 'admin2026';
 
-/** True only when the socket has role === 'editor' in its current room. */
-function isEditor(socket) {
+/**
+ * Per-socket role map: socketId → { roomId, role: 'observer'|'editor'|'admin' }
+ */
+const socketRoles = new Map();
+
+/** True only if socket has role === 'admin' */
+function isAdmin(socket) {
   const entry = socketRoles.get(socket.id);
-  return entry?.role === 'editor';
+  return entry?.role === 'admin';
+}
+
+/**
+ * True if socket is permitted to make modifications:
+ * - Admin can ALWAYS edit.
+ * - Editor can edit ONLY IF room is NOT locked and NOT autolocked.
+ * - Observer can NEVER edit.
+ */
+function canEdit(socket) {
+  const entry = socketRoles.get(socket.id);
+  if (!entry) return false;
+  if (entry.role === 'admin') return true;
+  if (entry.role !== 'editor') return false;
+
+  const room = getRoom(entry.roomId);
+  if (!room) return false;
+  if (room.isLocked || room.autoLockEnabled) return false;
+
+  return true;
 }
 
 export function registerSocketHandlers(io) {
   io.on('connection', (socket) => {
-    console.log(`[socket] connected  ${socket.id}`);
-
     // ── JOIN ROOM ────────────────────────────────────────────────────────────
-    // Client emits: { roomId }
-    // Server responds: { canvasState, mediaElements, role }
-    socket.on('room:join', ({ roomId } = {}) => {
+    socket.on('room:join', ({ roomId, adminKey } = {}) => {
       if (!roomId || !roomExists(roomId)) {
         socket.emit('error', { message: 'Room not found.' });
         return;
       }
 
       socket.join(roomId);
-      socketRoles.set(socket.id, { roomId, role: 'observer' });
-
       const room = getRoom(roomId);
-      // Send current canvas snapshot to the newcomer only
+
+      // Check if joining with valid admin key directly
+      let role = 'observer';
+      if (adminKey && adminKey.trim() === ADMIN_SECRET) {
+        role = 'admin';
+      }
+
+      socketRoles.set(socket.id, { roomId, role });
+
       socket.emit('room:joined', {
-        role: 'observer',
+        role,
+        roomName: room.name || `Room ${roomId.slice(0, 4)}`,
+        isLocked: !!room.isLocked,
+        autoLockEnabled: !!room.autoLockEnabled,
         canvasState: room.canvasState,
         mediaElements: room.mediaElements,
       });
 
-      console.log(`[socket] ${socket.id} joined room ${roomId} as observer`);
+      console.log(`[socket] ${socket.id} joined room ${roomId} as ${role}`);
     });
 
-    // ── AUTHENTICATE (Upgrade to Editor) ─────────────────────────────────────
-    // Client emits: { roomId, password }
-    // Server responds: { success, role }
+    // ── AUTHENTICATE AS NORMAL EDITOR ────────────────────────────────────────
     socket.on('room:authenticate', async ({ roomId, password } = {}) => {
       const entry = socketRoles.get(socket.id);
       if (!entry || entry.roomId !== roomId) {
@@ -56,60 +79,128 @@ export function registerSocketHandlers(io) {
         return;
       }
 
-      const match = await bcrypt.compare(password ?? '', room.passwordHash);
-      if (!match) {
-        socket.emit('auth:result', { success: false, message: 'Incorrect password.' });
+      // Check room lock status
+      if (room.isLocked || room.autoLockEnabled) {
+        socket.emit('auth:result', {
+          success: false,
+          message: 'This room is currently locked by the administrator.',
+          isLocked: room.isLocked,
+          autoLockEnabled: room.autoLockEnabled,
+        });
         return;
       }
 
-      // Upgrade role
+      const match = await bcrypt.compare(password ?? '', room.passwordHash);
+      if (!match) {
+        socket.emit('auth:result', { success: false, message: 'Incorrect room password.' });
+        return;
+      }
+
       socketRoles.set(socket.id, { roomId, role: 'editor' });
-      socket.emit('auth:result', { success: true, role: 'editor' });
-      console.log(`[socket] ${socket.id} upgraded to editor in room ${roomId}`);
+      socket.emit('auth:result', {
+        success: true,
+        role: 'editor',
+        isLocked: room.isLocked,
+        autoLockEnabled: room.autoLockEnabled,
+      });
+      console.log(`[socket] ${socket.id} authenticated as editor in room ${roomId}`);
+    });
+
+    // ── AUTHENTICATE AS MASTER ADMIN ─────────────────────────────────────────
+    socket.on('room:admin-auth', ({ roomId, adminKey } = {}) => {
+      const entry = socketRoles.get(socket.id);
+      if (!entry || entry.roomId !== roomId) {
+        socket.emit('auth:result', { success: false, message: 'Join the room first.' });
+        return;
+      }
+
+      const room = getRoom(roomId);
+      if (!room) {
+        socket.emit('auth:result', { success: false, message: 'Room not found.' });
+        return;
+      }
+
+      if (!adminKey || adminKey.trim() !== ADMIN_SECRET) {
+        socket.emit('auth:result', { success: false, message: 'Invalid admin passcode.' });
+        return;
+      }
+
+      socketRoles.set(socket.id, { roomId, role: 'admin' });
+      socket.emit('auth:result', {
+        success: true,
+        role: 'admin',
+        isLocked: room.isLocked,
+        autoLockEnabled: room.autoLockEnabled,
+      });
+      console.log(`[socket] ${socket.id} elevated to ADMIN in room ${roomId}`);
+    });
+
+    // ── ADMIN: TOGGLE ROOM LOCK ──────────────────────────────────────────────
+    socket.on('room:toggle-lock', ({ roomId, isLocked } = {}) => {
+      if (!isAdmin(socket)) return;
+      const room = getRoom(roomId);
+      if (!room) return;
+
+      room.isLocked = !!isLocked;
+      setRoom(roomId, room);
+
+      io.to(roomId).emit('room:status-updated', {
+        isLocked: room.isLocked,
+        autoLockEnabled: room.autoLockEnabled,
+      });
+      console.log(`[socket] Room ${roomId} lock toggled to ${room.isLocked} by admin`);
+    });
+
+    // ── ADMIN: TOGGLE AUTO-LOCK ──────────────────────────────────────────────
+    socket.on('room:toggle-autolock', ({ roomId, autoLockEnabled } = {}) => {
+      if (!isAdmin(socket)) return;
+      const room = getRoom(roomId);
+      if (!room) return;
+
+      room.autoLockEnabled = !!autoLockEnabled;
+      setRoom(roomId, room);
+
+      io.to(roomId).emit('room:status-updated', {
+        isLocked: room.isLocked,
+        autoLockEnabled: room.autoLockEnabled,
+      });
+      console.log(`[socket] Room ${roomId} autolock toggled to ${room.autoLockEnabled} by admin`);
     });
 
     // ── CANVAS: FULL STATE SYNC ──────────────────────────────────────────────
-    // Editor emits a full Fabric.js JSON export so late-joiners get correct state.
-    // Event: { roomId, canvasJSON }
     socket.on('canvas:sync', ({ roomId, canvasJSON } = {}) => {
-      if (!isEditor(socket)) return; // silently drop from non-editors
+      if (!canEdit(socket)) return;
 
       const room = getRoom(roomId);
       if (!room) return;
 
-      room.canvasState = canvasJSON; // persist on server
+      room.canvasState = canvasJSON;
       setRoom(roomId, room);
 
-      // Broadcast to everyone else in the room
       socket.to(roomId).emit('canvas:sync', { canvasJSON });
     });
 
-    // ── CANVAS: INCREMENTAL OBJECT ADD / MODIFY / DELETE ────────────────────
-    // These are lightweight deltas so the server doesn't have to re-parse the whole canvas.
-    ['canvas:object:added', 'canvas:object:modified', 'canvas:object:removed'].forEach(
-      (event) => {
-        socket.on(event, (payload) => {
-          if (!isEditor(socket)) return;
-          const { roomId } = socketRoles.get(socket.id) ?? {};
-          if (!roomId) return;
-          socket.to(roomId).emit(event, payload);
-        });
-      }
-    );
+    // ── CANVAS: INCREMENTAL OBJECT ADD / MODIFY ─────────────────────────────
+    ['canvas:object:added', 'canvas:object:modified'].forEach((event) => {
+      socket.on(event, (payload) => {
+        if (!canEdit(socket)) return;
+        const { roomId } = socketRoles.get(socket.id) ?? {};
+        if (!roomId) return;
+        socket.to(roomId).emit(event, payload);
+      });
+    });
 
-    // ── CANVAS: FREE-DRAW PATH STREAMING ────────────────────────────────────
-    // Real-time stroke preview while drawing (before mouseUp).
-    socket.on('canvas:draw:path', (payload) => {
-      if (!isEditor(socket)) return;
+    // Canvas removal: only admin can remove objects
+    socket.on('canvas:object:removed', (payload) => {
+      if (!isAdmin(socket)) return;
       const { roomId } = socketRoles.get(socket.id) ?? {};
       if (!roomId) return;
-      socket.to(roomId).emit('canvas:draw:path', payload);
+      socket.to(roomId).emit('canvas:object:removed', payload);
     });
 
     // ── MEDIA: YouTube / Image Overlay ───────────────────────────────────────
-    // Payloads: { roomId, element: { id, type, url, x, y, width, height } }
     socket.on('media:add', (payload) => {
-      if (!isEditor(socket)) return;
+      if (!canEdit(socket)) return;
       const room = getRoom(payload?.roomId);
       if (!room) return;
 
@@ -120,7 +211,7 @@ export function registerSocketHandlers(io) {
     });
 
     socket.on('media:update', (payload) => {
-      if (!isEditor(socket)) return;
+      if (!canEdit(socket)) return;
       const room = getRoom(payload?.roomId);
       if (!room) return;
 
@@ -132,8 +223,9 @@ export function registerSocketHandlers(io) {
       socket.to(payload.roomId).emit('media:update', { element: payload.element });
     });
 
+    // Media removal: only admin can completely remove media overlays
     socket.on('media:remove', ({ roomId, elementId } = {}) => {
-      if (!isEditor(socket)) return;
+      if (!isAdmin(socket)) return;
       const room = getRoom(roomId);
       if (!room) return;
 
@@ -144,9 +236,8 @@ export function registerSocketHandlers(io) {
     });
 
     // ── VIEWPORT SYNC (pan / zoom) ───────────────────────────────────────────
-    // Optionally broadcast viewport to sync YouTube overlay positions.
     socket.on('viewport:change', (payload) => {
-      if (!isEditor(socket)) return;
+      if (!canEdit(socket)) return;
       const { roomId } = socketRoles.get(socket.id) ?? {};
       if (!roomId) return;
       socket.to(roomId).emit('viewport:change', payload);
@@ -166,7 +257,6 @@ export function registerSocketHandlers(io) {
         io.to(entry.roomId).emit('peer:left', { socketId: socket.id });
       }
       socketRoles.delete(socket.id);
-      console.log(`[socket] disconnected ${socket.id}`);
     });
   });
 }

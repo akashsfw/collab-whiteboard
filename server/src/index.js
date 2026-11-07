@@ -22,6 +22,15 @@ const corsOrigin = process.env.CLIENT_ORIGIN || true;
 app.use(cors({ origin: corsOrigin, credentials: true }));
 app.use(express.json({ limit: '20mb' })); // allow base64 image uploads
 
+// ── Socket.io ─────────────────────────────────────────────────────────────────
+const io = new Server(httpServer, {
+  cors: { origin: corsOrigin, credentials: true },
+  maxHttpBufferSize: 20e6, // 20 MB for image payloads
+});
+
+app.set('io', io);
+registerSocketHandlers(io);
+
 // ── REST Routes ───────────────────────────────────────────────────────────────
 app.use('/api/rooms', roomRouter);
 
@@ -38,14 +47,6 @@ if (fs.existsSync(distPath)) {
     res.sendFile(path.join(distPath, 'index.html'));
   });
 }
-
-// ── Socket.io ─────────────────────────────────────────────────────────────────
-const io = new Server(httpServer, {
-  cors: { origin: corsOrigin, credentials: true },
-  maxHttpBufferSize: 20e6, // 20 MB for image payloads
-});
-
-registerSocketHandlers(io);
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 4000;

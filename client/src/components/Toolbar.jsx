@@ -21,6 +21,11 @@ export default function Toolbar({
   brushSize, setBrushSize,
   canvasRef,
   roomId,
+  isAdmin,
+  isLocked,
+  autoLockEnabled,
+  onToggleLock,
+  onToggleAutoLock,
   onAddYoutube,
 }) {
   const fileInputRef = useRef(null);
@@ -127,7 +132,7 @@ export default function Toolbar({
 
         <Divider />
 
-        {/* Undo, Redo, Delete */}
+        {/* Undo & Redo */}
         <ToolBtn
           icon="↩"
           label="Undo (Ctrl+Z)"
@@ -138,12 +143,23 @@ export default function Toolbar({
           label="Redo (Ctrl+Y)"
           onClick={() => canvasRef.current?.redo()}
         />
+
+        {/* Hide / Unhide Selected Object (Replaces destructive deletion) */}
         <ToolBtn
-          icon="❌"
-          label="Delete Selected (Del)"
-          onClick={() => canvasRef.current?.deleteSelected()}
-          danger
+          icon="👁️‍🗨️"
+          label="Hide / Unhide Selected"
+          onClick={() => canvasRef.current?.toggleHideSelected()}
         />
+
+        {/* Admin only: Delete selected if admin wishes */}
+        {isAdmin && (
+          <ToolBtn
+            icon="🗑️"
+            label="Admin: Delete Selected"
+            onClick={() => canvasRef.current?.deleteSelected()}
+            danger
+          />
+        )}
 
         <Divider />
 
@@ -153,6 +169,25 @@ export default function Toolbar({
           label="Save Checkpoint (Flatten)"
           onClick={handleSaveCheckpoint}
         />
+
+        {/* Admin Lock Toggles */}
+        {isAdmin && (
+          <>
+            <Divider />
+            <ToolBtn
+              icon={isLocked ? '🔒' : '🔓'}
+              label={isLocked ? 'Room is Locked (Click to Unlock)' : 'Lock Room Permanently'}
+              active={isLocked}
+              onClick={onToggleLock}
+            />
+            <ToolBtn
+              icon="⏱️"
+              label={autoLockEnabled ? 'Auto-Lock is ON (Click to Disable)' : 'Enable Auto-Lock for Users'}
+              active={autoLockEnabled}
+              onClick={onToggleAutoLock}
+            />
+          </>
+        )}
       </aside>
 
       {/* ── MOBILE FLOATING BOTTOM BAR (< md) ──────────────────────────────── */}
@@ -263,16 +298,39 @@ export default function Toolbar({
                 onClick={() => canvasRef.current?.redo()}
               />
               <ToolBtn
-                icon="❌"
-                label="Delete"
-                onClick={() => canvasRef.current?.deleteSelected()}
-                danger
+                icon="👁️‍🗨️"
+                label="Hide"
+                onClick={() => canvasRef.current?.toggleHideSelected()}
               />
+              {isAdmin && (
+                <ToolBtn
+                  icon="🗑️"
+                  label="Delete"
+                  onClick={() => canvasRef.current?.deleteSelected()}
+                  danger
+                />
+              )}
               <ToolBtn
                 icon="💾"
-                label="Save Checkpoint"
+                label="Save"
                 onClick={handleSaveCheckpoint}
               />
+              {isAdmin && (
+                <>
+                  <ToolBtn
+                    icon={isLocked ? '🔒' : '🔓'}
+                    label="Lock"
+                    active={isLocked}
+                    onClick={onToggleLock}
+                  />
+                  <ToolBtn
+                    icon="⏱️"
+                    label="AutoLock"
+                    active={autoLockEnabled}
+                    onClick={onToggleAutoLock}
+                  />
+                </>
+              )}
             </div>
           )}
         </div>

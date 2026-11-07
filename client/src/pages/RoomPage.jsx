@@ -12,8 +12,10 @@ export default function RoomPage() {
   const { roomId } = useParams();
   const navigate = useNavigate();
 
-  const [roomMeta, setRoomMeta] = useState(null);   // null = loading, false = not found
-  const [role, setRole] = useState('observer');       // 'observer' | 'editor'
+  const [roomMeta, setRoomMeta] = useState(null);       // null = loading, false = not found
+  const [role, setRole] = useState('observer');           // 'observer' | 'editor' | 'admin'
+  const [isLocked, setIsLocked] = useState(false);       // Admin permanent lock
+  const [autoLockEnabled, setAutoLockEnabled] = useState(false); // Auto-lock for all normal users
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [authError, setAuthError] = useState('');
   const [copied, setCopied] = useState(false);
@@ -30,7 +32,7 @@ export default function RoomPage() {
   // Viewport state for overlay sync (pan/zoom from Fabric)
   const [viewport, setViewport] = useState({ x: 0, y: 0, zoom: 1 });
 
-  const canvasRef = useRef(null); // exposed from WhiteboardCanvas
+  const canvasRef = useRef(null);
 
   // ── 1. Verify room exists ──────────────────────────────────────────────────
   useEffect(() => {
@@ -39,6 +41,8 @@ export default function RoomPage() {
         setRoomMeta(false);
       } else {
         setRoomMeta(data);
+        setIsLocked(!!data.isLocked);
+        setAutoLockEnabled(!!data.autoLockEnabled);
       }
     });
   }, [roomId]);
@@ -50,22 +54,34 @@ export default function RoomPage() {
     const socket = getSocket();
     if (!socket.connected) socket.connect();
 
-    socket.emit('room:join', { roomId });
+    const storedAdminKey = sessionStorage.getItem('adminKey') || '';
 
-    socket.on('room:joined', ({ role: r, canvasState, mediaElements: me }) => {
+    // Join room with optional admin key
+    socket.emit('room:join', { roomId, adminKey: storedAdminKey });
+
+    socket.on('room:joined', ({ role: r, isLocked: il, autoLockEnabled: al, canvasState, mediaElements: me }) => {
       setRole(r);
+      setIsLocked(il);
+      setAutoLockEnabled(al);
       setInitialCanvas(canvasState);
       setMediaElements(me || []);
     });
 
-    socket.on('auth:result', ({ success, role: r, message }) => {
+    socket.on('auth:result', ({ success, role: r, message, isLocked: il, autoLockEnabled: al }) => {
       if (success) {
         setRole(r);
+        if (il !== undefined) setIsLocked(il);
+        if (al !== undefined) setAutoLockEnabled(al);
         setShowPasswordModal(false);
         setAuthError('');
       } else {
         setAuthError(message || 'Incorrect password.');
       }
+    });
+
+    socket.on('room:status-updated', ({ isLocked: il, autoLockEnabled: al }) => {
+      setIsLocked(il);
+      setAutoLockEnabled(al);
     });
 
     // Media overlay events
@@ -83,6 +99,7 @@ export default function RoomPage() {
     return () => {
       socket.off('room:joined');
       socket.off('auth:result');
+      socket.off('room:status-updated');
       socket.off('media:add');
       socket.off('media:update');
       socket.off('media:remove');
@@ -94,6 +111,14 @@ export default function RoomPage() {
   function handlePasswordSubmit(password) {
     setAuthError('');
     getSocket().emit('room:authenticate', { roomId, password });
+  }
+
+  function handleToggleLock() {
+    getSocket().emit('room:toggle-lock', { roomId, isLocked: !isLocked });
+  }
+
+  function handleToggleAutoLock() {
+    getSocket().emit('room:toggle-autolock', { roomId, autoLockEnabled: !autoLockEnabled });
   }
 
   function handleAddYoutube() {
@@ -133,31 +158,51 @@ export default function RoomPage() {
     );
   }
 
-  const isEditor = role === 'editor';
+  const isAdmin = role === 'admin';
+  // Normal editors are blocked from editing if the room is locked or autolocked
+  const isEditingAllowed = isAdmin || (role === 'editor' && !isLocked && !autoLockEnabled);
 
   return (
     <div className="flex flex-col h-screen overflow-hidden bg-canvas">
-      {/* ── Top Bar (Mobile-responsive) ─────────────────────────────────── */}
+      {/* ── Top Bar ─────────────────────────────────────────────────────── */}
       <header className="flex items-center justify-between px-3 sm:px-4 py-2 bg-surface border-b border-white/10 z-20 shrink-0">
         <div className="flex items-center gap-2 sm:gap-3 min-w-0">
-          <span className="text-white font-bold text-base sm:text-lg shrink-0">
-            Collab<span className="text-accent">Board</span>
-          </span>
-          <span className="hidden sm:inline text-muted text-xs font-mono bg-canvas px-2 py-1 rounded truncate max-w-[120px]">
-            {roomId}
+          <button
+            onClick={() => navigate('/')}
+            title="Back to All Rooms"
+            className="text-white font-bold text-base sm:text-lg hover:text-accent transition-colors shrink-0"
+          >
+            ← Collab<span className="text-accent">Board</span>
+          </button>
+          <span className="hidden sm:inline text-muted text-xs font-mono bg-canvas px-2 py-1 rounded truncate max-w-[160px]">
+            {roomMeta?.name || roomId}
           </span>
         </div>
 
         <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+          {/* Status Badges */}
+          {isLocked && (
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-950/80 text-red-300 border border-red-700">
+              🔒 Locked
+            </span>
+          )}
+          {autoLockEnabled && !isLocked && (
+            <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-amber-950/80 text-amber-300 border border-amber-700">
+              ⏱️ Auto-Lock
+            </span>
+          )}
+
           {/* Role badge */}
           <span
             className={`text-[11px] sm:text-xs font-semibold px-2 sm:px-3 py-1 rounded-full shrink-0 ${
-              isEditor
+              isAdmin
+                ? 'bg-purple-900/70 text-purple-200 border border-purple-500 font-bold'
+                : isEditingAllowed
                 ? 'bg-green-900/60 text-green-300 border border-green-700'
                 : 'bg-yellow-900/60 text-yellow-300 border border-yellow-700'
             }`}
           >
-            {isEditor ? '✏️ Editor' : '👁️ Observer'}
+            {isAdmin ? '👑 Admin' : isEditingAllowed ? '✏️ Editor' : '👁️ Observer'}
           </span>
 
           {/* Copy link */}
@@ -174,8 +219,8 @@ export default function RoomPage() {
             <span className="hidden sm:inline">{copied ? 'Copied!' : 'Copy Link'}</span>
           </button>
 
-          {/* Enter editor mode */}
-          {!isEditor && (
+          {/* Normal user password upgrade */}
+          {!isAdmin && role !== 'editor' && !isLocked && !autoLockEnabled && (
             <button
               onClick={() => setShowPasswordModal(true)}
               className="bg-accent hover:bg-accent-hover text-white text-xs sm:text-sm font-medium px-2.5 sm:px-4 py-1.5 rounded-lg transition-colors shrink-0"
@@ -186,10 +231,22 @@ export default function RoomPage() {
         </div>
       </header>
 
-      {/* ── Main Area ──────────────────────────────────────────────────────── */}
+      {/* ── Lock Warning Banner for Non-Admins ────────────────────────────── */}
+      {(isLocked || autoLockEnabled) && !isAdmin && (
+        <div className="bg-amber-950/90 border-b border-amber-800/60 px-4 py-1.5 text-xs text-amber-200 text-center flex items-center justify-center gap-2 z-20">
+          <span>🔒</span>
+          <span>
+            {isLocked
+              ? 'This room has been permanently locked by the Administrator. Canvas editing is disabled.'
+              : 'Auto-Lock is active: Canvas editing is currently locked for all users.'}
+          </span>
+        </div>
+      )}
+
+      {/* ── Main Canvas Area ────────────────────────────────────────────────── */}
       <div className="flex flex-1 overflow-hidden">
-        {/* Sidebar Toolbar (editor-only) */}
-        {isEditor && (
+        {/* Sidebar Toolbar (Visible if editor is allowed to edit) */}
+        {isEditingAllowed && (
           <Toolbar
             activeTool={activeTool}
             setActiveTool={setActiveTool}
@@ -199,6 +256,11 @@ export default function RoomPage() {
             setBrushSize={setBrushSize}
             canvasRef={canvasRef}
             roomId={roomId}
+            isAdmin={isAdmin}
+            isLocked={isLocked}
+            autoLockEnabled={autoLockEnabled}
+            onToggleLock={handleToggleLock}
+            onToggleAutoLock={handleToggleAutoLock}
             onAddYoutube={handleAddYoutube}
           />
         )}
@@ -216,23 +278,24 @@ export default function RoomPage() {
           <WhiteboardCanvas
             ref={canvasRef}
             roomId={roomId}
-            isEditor={isEditor}
+            isEditor={isEditingAllowed}
             activeTool={activeTool}
             activeColor={activeColor}
             brushSize={brushSize}
             initialCanvas={initialCanvas}
             onViewportChange={(vp) => {
               setViewport(vp);
-              if (isEditor) getSocket().emit('viewport:change', vp);
+              if (isEditingAllowed) getSocket().emit('viewport:change', vp);
             }}
           />
 
-          {/* YouTube / image overlays positioned relative to canvas */}
+          {/* YouTube / image overlays */}
           <MediaOverlayLayer
             elements={mediaElements}
             setElements={setMediaElements}
             viewport={viewport}
-            isEditor={isEditor}
+            isEditor={isEditingAllowed}
+            isAdmin={isAdmin}
             roomId={roomId}
           />
 
