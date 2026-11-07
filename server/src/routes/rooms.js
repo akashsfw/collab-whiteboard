@@ -28,22 +28,29 @@ roomRouter.get('/', (_req, res) => {
 
 /**
  * POST /api/rooms
- * Body: { name?: string, password: string, autoLockEnabled?: boolean }
- * Creates a new room, returns { roomId }
+ * Body: { roomId?: string, name?: string, password: string, autoLockEnabled?: boolean }
+ * Creates a new room (or provisions requested roomId), returns { roomId }
  */
 roomRouter.post('/', async (req, res) => {
   const { name, password, autoLockEnabled } = req.body;
+  let customId = req.body.roomId ? String(req.body.roomId).trim().toLowerCase() : null;
 
   if (!password || typeof password !== 'string' || password.trim().length < 4) {
     return res.status(400).json({ error: 'Password must be at least 4 characters.' });
   }
 
-  // Generate a collision-safe room ID (3 segments for readability)
-  let roomId;
-  do {
-    const raw = nanoid();
-    roomId = `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8)}`;
-  } while (roomExists(roomId));
+  let roomId = customId;
+  if (roomId) {
+    if (roomExists(roomId)) {
+      return res.status(409).json({ error: 'A room with this ID already exists.' });
+    }
+  } else {
+    // Generate a collision-safe room ID (3 segments for readability)
+    do {
+      const raw = nanoid();
+      roomId = `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8)}`;
+    } while (roomExists(roomId));
+  }
 
   const passwordHash = await bcrypt.hash(password.trim(), 12);
 

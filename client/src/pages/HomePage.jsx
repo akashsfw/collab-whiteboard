@@ -12,6 +12,20 @@ import {
   deleteRoomAdmin,
 } from '../lib/api.js';
 
+function getStoredAdminKey() {
+  return localStorage.getItem('adminKey') || sessionStorage.getItem('adminKey') || '';
+}
+
+function storeAdminKey(key) {
+  if (key) {
+    localStorage.setItem('adminKey', key);
+    sessionStorage.setItem('adminKey', key);
+  } else {
+    localStorage.removeItem('adminKey');
+    sessionStorage.removeItem('adminKey');
+  }
+}
+
 export default function HomePage() {
   const navigate = useNavigate();
   const fileInputRef = useRef(null);
@@ -29,9 +43,7 @@ export default function HomePage() {
   const [createError, setCreateError] = useState('');
 
   // Admin access state
-  const [adminKey, setAdminKey] = useState(
-    () => sessionStorage.getItem('adminKey') || ''
-  );
+  const [adminKey, setAdminKey] = useState(() => getStoredAdminKey());
   const [isAdmin, setIsAdmin] = useState(false);
   const [showAdminModal, setShowAdminModal] = useState(false);
   const [adminInputKey, setAdminInputKey] = useState('');
@@ -51,7 +63,7 @@ export default function HomePage() {
       verifyAdminKey(adminKey)
         .then(() => setIsAdmin(true))
         .catch(() => {
-          sessionStorage.removeItem('adminKey');
+          storeAdminKey('');
           setAdminKey('');
           setIsAdmin(false);
         });
@@ -101,7 +113,7 @@ export default function HomePage() {
     try {
       await verifyAdminKey(adminInputKey.trim());
       const key = adminInputKey.trim();
-      sessionStorage.setItem('adminKey', key);
+      storeAdminKey(key);
       setAdminKey(key);
       setIsAdmin(true);
       setShowAdminModal(false);
@@ -113,7 +125,7 @@ export default function HomePage() {
   }
 
   function handleAdminLogout() {
-    sessionStorage.removeItem('adminKey');
+    storeAdminKey('');
     setAdminKey('');
     setIsAdmin(false);
   }
@@ -227,7 +239,7 @@ export default function HomePage() {
   });
 
   return (
-    <div className="min-h-screen bg-canvas text-[#e2e2f0] flex flex-col">
+    <div className="min-h-screen w-full bg-canvas text-[#e2e2f0] flex flex-col overflow-y-auto">
       {/* ── Top Navigation Bar ────────────────────────────────────────────── */}
       <header className="border-b border-white/10 bg-surface/90 backdrop-blur-md px-4 sm:px-8 py-3.5 flex items-center justify-between sticky top-0 z-30">
         <div className="flex items-center gap-3">
@@ -292,7 +304,7 @@ export default function HomePage() {
       </header>
 
       {/* ── Main Container ─────────────────────────────────────────────────── */}
-      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-8 flex flex-col gap-8">
+      <main className="flex-1 max-w-6xl w-full mx-auto px-4 sm:px-8 py-8 pb-28 flex flex-col gap-8">
         {/* Hero & Create Room Card */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           {/* Left Hero Description */}

@@ -8,11 +8,11 @@ export async function fetchRooms() {
 }
 
 /** POST /api/rooms — create room, returns { roomId, room } */
-export async function createRoom({ name, password, autoLockEnabled }) {
+export async function createRoom({ roomId, name, password, autoLockEnabled }) {
   const res = await fetch(`${BASE}/api/rooms`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, password, autoLockEnabled }),
+    body: JSON.stringify({ roomId, name, password, autoLockEnabled }),
     credentials: 'include',
   });
   if (!res.ok) {

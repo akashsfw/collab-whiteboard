@@ -1,12 +1,26 @@
 import { useEffect, useState, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { fetchRoom } from '../lib/api.js';
+import { fetchRoom, createRoom, verifyAdminKey } from '../lib/api.js';
 import { getSocket } from '../lib/socket.js';
 import WhiteboardCanvas from '../components/WhiteboardCanvas.jsx';
 import Toolbar from '../components/Toolbar.jsx';
 import PasswordModal from '../components/PasswordModal.jsx';
 import MediaOverlayLayer from '../components/MediaOverlayLayer.jsx';
 import CursorLayer from '../components/CursorLayer.jsx';
+
+function getStoredAdminKey() {
+  return localStorage.getItem('adminKey') || sessionStorage.getItem('adminKey') || '';
+}
+
+function storeAdminKey(key) {
+  if (key) {
+    localStorage.setItem('adminKey', key);
+    sessionStorage.setItem('adminKey', key);
+  } else {
+    localStorage.removeItem('adminKey');
+    sessionStorage.removeItem('adminKey');
+  }
+}
 
 export default function RoomPage() {
   const { roomId } = useParams();
@@ -17,8 +31,14 @@ export default function RoomPage() {
   const [isLocked, setIsLocked] = useState(false);       // Admin permanent lock
   const [autoLockEnabled, setAutoLockEnabled] = useState(false); // Auto-lock for all normal users
   const [showPasswordModal, setShowPasswordModal] = useState(false);
+  const [passwordModalTab, setPasswordModalTab] = useState('user'); // 'user' | 'admin'
   const [authError, setAuthError] = useState('');
   const [copied, setCopied] = useState(false);
+
+  // Claim/setup room state when roomMeta === false
+  const [claimPassword, setClaimPassword] = useState('');
+  const [claimError, setClaimError] = useState('');
+  const [claimLoading, setClaimLoading] = useState(false);
 
   // Shared state between Canvas and MediaOverlayLayer
   const [activeTool, setActiveTool] = useState('select');
@@ -36,8 +56,12 @@ export default function RoomPage() {
 
   // ── 1. Verify room exists ──────────────────────────────────────────────────
   useEffect(() => {
-    const storedAdminKey = sessionStorage.getItem('adminKey') || '';
-    fetchRoom(roomId, storedAdminKey).then((data) => {
+    loadRoomData();
+  }, [roomId]);
+
+  function loadRoomData() {
+    const adminKey = getStoredAdminKey();
+    fetchRoom(roomId, adminKey).then((data) => {
       if (!data) {
         setRoomMeta(false);
       } else {
@@ -46,7 +70,7 @@ export default function RoomPage() {
         setAutoLockEnabled(!!data.autoLockEnabled);
       }
     });
-  }, [roomId]);
+  }
 
   // ── 2. Connect socket and join room ───────────────────────────────────────
   useEffect(() => {
@@ -55,7 +79,7 @@ export default function RoomPage() {
     const socket = getSocket();
     if (!socket.connected) socket.connect();
 
-    const storedAdminKey = sessionStorage.getItem('adminKey') || '';
+    const storedAdminKey = getStoredAdminKey();
 
     // Join room with optional admin key
     socket.emit('room:join', { roomId, adminKey: storedAdminKey });
@@ -114,6 +138,18 @@ export default function RoomPage() {
     getSocket().emit('room:authenticate', { roomId, password });
   }
 
+  function handleAdminSubmit(adminKey) {
+    setAuthError('');
+    getSocket().emit('room:admin-auth', { roomId, adminKey });
+    storeAdminKey(adminKey);
+  }
+
+  function handleAdminLogout() {
+    storeAdminKey('');
+    setRole('observer');
+    getSocket().emit('room:join', { roomId, adminKey: '' });
+  }
+
   function handleToggleLock() {
     getSocket().emit('room:toggle-lock', { roomId, isLocked: !isLocked });
   }
@@ -137,6 +173,42 @@ export default function RoomPage() {
     getSocket().emit('media:add', { roomId, element });
   }
 
+  // Claim/initialize room handlers when room doesn't exist yet
+  async function handleClaimRoom(e) {
+    e.preventDefault();
+    setClaimError('');
+    if (claimPassword.trim().length < 4) {
+      setClaimError('Password must be at least 4 characters.');
+      return;
+    }
+    setClaimLoading(true);
+    try {
+      await createRoom({
+        roomId,
+        name: `Room ${roomId.slice(0, 4)}`,
+        password: claimPassword.trim(),
+        autoLockEnabled: false,
+      });
+      loadRoomData();
+    } catch (err) {
+      setClaimError(err.message || 'Failed to initialize room.');
+    } finally {
+      setClaimLoading(false);
+    }
+  }
+
+  async function handleClaimAsAdmin(adminKey) {
+    try {
+      await verifyAdminKey(adminKey);
+      storeAdminKey(adminKey);
+      // Auto-provision room with admin key
+      await fetchRoom(roomId, adminKey);
+      loadRoomData();
+    } catch (err) {
+      alert(`Admin validation failed: ${err.message}`);
+    }
+  }
+
   if (roomMeta === null) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-canvas text-muted text-lg">
@@ -145,16 +217,65 @@ export default function RoomPage() {
     );
   }
 
+  // ── Room Not Found / Setup Card ───────────────────────────────────────────
   if (roomMeta === false) {
     return (
-      <div className="min-h-screen flex flex-col items-center justify-center bg-canvas gap-4">
-        <p className="text-red-400 text-xl font-semibold">Room not found.</p>
-        <button
-          onClick={() => navigate('/')}
-          className="bg-accent hover:bg-accent-hover text-white px-6 py-2 rounded-lg"
-        >
-          Back to Home
-        </button>
+      <div className="min-h-screen flex flex-col items-center justify-center bg-canvas px-4 py-8">
+        <div className="bg-surface border border-white/10 rounded-2xl shadow-2xl p-6 sm:p-8 max-w-md w-full flex flex-col gap-5">
+          <div className="text-center">
+            <span className="text-4xl">🎨</span>
+            <h2 className="text-xl font-bold text-white mt-2">Room Not Active</h2>
+            <p className="text-muted text-xs mt-1">
+              Room ID: <span className="text-accent font-mono font-bold">{roomId}</span>
+            </p>
+            <p className="text-muted text-xs mt-2">
+              This room has not been initialized on the server yet. You can start it right now to draw or regain access.
+            </p>
+          </div>
+
+          {/* Form to start room */}
+          <form onSubmit={handleClaimRoom} className="space-y-3 border-t border-white/10 pt-4">
+            <label className="block text-xs font-semibold text-muted">
+              Set Password to Initialize this Room:
+            </label>
+            <input
+              type="password"
+              placeholder="Min. 4 characters"
+              value={claimPassword}
+              onChange={(e) => setClaimPassword(e.target.value)}
+              className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-accent"
+            />
+            {claimError && <p className="text-red-400 text-xs">{claimError}</p>}
+            <button
+              type="submit"
+              disabled={claimLoading}
+              className="w-full bg-accent hover:bg-accent-hover disabled:opacity-50 text-white font-semibold py-2.5 rounded-lg text-sm transition-colors"
+            >
+              {claimLoading ? 'Initializing Room…' : '✦ Initialize & Enter Room'}
+            </button>
+          </form>
+
+          {/* Admin one-click provision */}
+          <div className="border-t border-white/10 pt-4 flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const key = prompt('Enter Master Admin Passcode:');
+                if (key) handleClaimAsAdmin(key.trim());
+              }}
+              className="w-full bg-purple-700 hover:bg-purple-600 text-white font-semibold py-2 rounded-lg text-xs transition-colors flex items-center justify-center gap-1.5"
+            >
+              <span>👑</span> Open / Initialize as Master Admin
+            </button>
+            <button
+              type="button"
+              onClick={() => navigate('/')}
+              className="w-full border border-white/10 hover:border-white/20 text-muted hover:text-white py-2 rounded-lg text-xs transition-colors"
+            >
+              ← Back to All Rooms
+            </button>
+          </div>
+        </div>
       </div>
     );
   }
@@ -180,7 +301,7 @@ export default function RoomPage() {
           </span>
         </div>
 
-        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
+        <div className="flex items-center gap-1.5 sm:gap-2.5 shrink-0 flex-wrap">
           {/* Status Badges */}
           {isLocked && (
             <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-red-950/80 text-red-300 border border-red-700">
@@ -214,20 +335,62 @@ export default function RoomPage() {
               setTimeout(() => setCopied(false), 2000);
             }}
             title="Copy Room Link"
-            className="text-xs text-muted hover:text-white border border-white/10 px-2 sm:px-3 py-1 rounded-lg transition-colors flex items-center gap-1 shrink-0"
+            className="text-xs text-muted hover:text-white border border-white/10 px-2 sm:px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 shrink-0"
           >
             <span>{copied ? '✓' : '🔗'}</span>
-            <span className="hidden sm:inline">{copied ? 'Copied!' : 'Copy Link'}</span>
+            <span className="hidden sm:inline">{copied ? 'Copied!' : 'Copy'}</span>
           </button>
 
-          {/* Normal user password upgrade */}
-          {!isAdmin && role !== 'editor' && !isLocked && !autoLockEnabled && (
-            <button
-              onClick={() => setShowPasswordModal(true)}
-              className="bg-accent hover:bg-accent-hover text-white text-xs sm:text-sm font-medium px-2.5 sm:px-4 py-1.5 rounded-lg transition-colors shrink-0"
-            >
-              🔑 <span className="hidden sm:inline">Enter Password to </span>Edit
-            </button>
+          {/* If NOT Admin: Show Admin Login & Password Unlock buttons */}
+          {!isAdmin ? (
+            <div className="flex items-center gap-1.5">
+              {role !== 'editor' && !isLocked && !autoLockEnabled && (
+                <button
+                  onClick={() => { setPasswordModalTab('user'); setShowPasswordModal(true); setAuthError(''); }}
+                  className="bg-accent hover:bg-accent-hover text-white text-xs font-medium px-2.5 py-1 rounded-lg transition-colors shrink-0"
+                >
+                  🔑 Edit
+                </button>
+              )}
+              <button
+                onClick={() => { setPasswordModalTab('admin'); setShowPasswordModal(true); setAuthError(''); }}
+                className="bg-surface border border-purple-500/40 text-purple-300 hover:bg-purple-900/40 text-xs font-semibold px-2.5 py-1 rounded-lg transition-colors flex items-center gap-1 shrink-0"
+              >
+                <span>👑</span> Admin
+              </button>
+            </div>
+          ) : (
+            /* Admin controls in room header */
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleToggleLock}
+                className={`text-xs px-2 py-1 rounded-lg font-medium border transition-colors ${
+                  isLocked
+                    ? 'bg-red-950/50 border-red-700 text-red-300'
+                    : 'border-white/10 text-muted hover:text-white'
+                }`}
+                title="Admin permanent lock"
+              >
+                {isLocked ? '🔓 Unlock' : '🔒 Lock'}
+              </button>
+              <button
+                onClick={handleToggleAutoLock}
+                className={`text-xs px-2 py-1 rounded-lg font-medium border transition-colors ${
+                  autoLockEnabled
+                    ? 'bg-amber-950/50 border-amber-700 text-amber-300'
+                    : 'border-white/10 text-muted hover:text-white'
+                }`}
+                title="Admin auto-lock for normal users"
+              >
+                ⏱️ AutoLock
+              </button>
+              <button
+                onClick={handleAdminLogout}
+                className="text-[11px] text-muted hover:text-white border border-white/10 px-2 py-1 rounded-lg transition-colors"
+              >
+                Exit Admin
+              </button>
+            </div>
           )}
         </div>
       </header>
@@ -334,7 +497,9 @@ export default function RoomPage() {
       {showPasswordModal && (
         <PasswordModal
           error={authError}
+          initialTab={passwordModalTab}
           onSubmit={handlePasswordSubmit}
+          onAdminSubmit={handleAdminSubmit}
           onClose={() => { setShowPasswordModal(false); setAuthError(''); }}
         />
       )}
