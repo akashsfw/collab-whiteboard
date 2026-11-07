@@ -99,9 +99,9 @@ export default function HomePage() {
         await verifyRoomPassword(selectedRoom.id, roomPassword.trim());
         navigate(`/room/${selectedRoom.id}`);
       } else {
-        // Admin Mode: fixed password admin2026
+        // Admin Mode: fixed master password
         if (!adminPassword.trim()) {
-          setEntryError('Please enter the admin password (admin2026).');
+          setEntryError('Please enter the admin password.');
           setEntryLoading(false);
           return;
         }
@@ -434,7 +434,7 @@ export default function HomePage() {
               ) : (
                 <div>
                   <label className="block text-xs font-semibold text-muted mb-1" htmlFor="fixed-admin-pw">
-                    Fixed Master Admin Password
+                    Master Admin Password
                   </label>
                   <input
                     id="fixed-admin-pw"
@@ -442,11 +442,11 @@ export default function HomePage() {
                     autoFocus
                     value={adminPassword}
                     onChange={(e) => setAdminPassword(e.target.value)}
-                    placeholder="Fixed password: admin2026"
+                    placeholder="Enter admin password"
                     className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-purple-500"
                   />
                   <p className="text-[11px] text-purple-300/80 mt-1.5">
-                    Fixed admin password: <strong>admin2026</strong>. Grants full rights to lock, edit, and delete.
+                    Requires master admin privileges. Grants full rights to lock, edit, and delete.
                   </p>
                 </div>
               )}

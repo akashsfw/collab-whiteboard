@@ -342,7 +342,7 @@ export default function RoomPage() {
             <button
               type="button"
               onClick={() => {
-                const key = prompt('Enter Fixed Master Admin Passcode (admin2026):');
+                const key = prompt('Enter Master Admin Passcode:');
                 if (key) handleClaimAsAdmin(key.trim());
               }}
               className="w-full bg-purple-700 hover:bg-purple-600 text-white font-semibold py-2 rounded-lg text-xs transition-colors flex items-center justify-center gap-1.5"

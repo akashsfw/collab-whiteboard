@@ -104,7 +104,7 @@ export default function PasswordModal({
               <span>👑</span> Master Admin Access
             </h2>
             <p className="text-muted text-xs mb-4">
-              Fixed password: <strong className="text-purple-300">admin2026</strong>. Grants full rights to lock, edit, and delete.
+              Enter the master admin password to unlock management and editing privileges.
             </p>
 
             <form onSubmit={handleAdminSubmit} className="space-y-4">
@@ -114,7 +114,7 @@ export default function PasswordModal({
                   autoFocus
                   value={adminKey}
                   onChange={(e) => setAdminKey(e.target.value)}
-                  placeholder="Fixed password: admin2026"
+                  placeholder="Enter admin password"
                   className="w-full bg-canvas border border-white/10 rounded-lg px-3.5 py-2 text-sm text-white placeholder-muted/50 focus:outline-none focus:ring-2 focus:ring-purple-500"
                 />
               </div>
